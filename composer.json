@@ -1,0 +1,42 @@
+{
+	"name": "melisplatform/melis-react-override",
+	"description": "Melis Platform React back-office override module (legacy tool iframe + SPA shell)",
+	"type": "melisplatform-module",
+	"license": "OSL-3.0",
+	"homepage": "https://github.com/melisplatform/melis-react-override",
+	"support": {
+		"email": "contact@melistechnology.com",
+		"source": "https://github.com/melisplatform/melis-react-override",
+		"issues": "https://github.com/melisplatform/melis-react-override/issues"
+	},
+	"authors": [
+		{
+			"name": "Melis Technology",
+			"email": "contact@melistechnology.com",
+			"homepage": "https://www.melistechnology.com",
+			"role": "Developer"
+		}
+	],
+	"keywords": [
+		"melis",
+		"react",
+		"backoffice",
+		"iframe",
+		"module"
+	],
+	"extra": {
+		"module-name": "MelisReactOverride",
+		"dbdeploy": false,
+		"melis-site": false,
+		"melis-module-category": "core"
+	},
+	"require": {
+		"php": "^8.1|^8.3",
+		"melisplatform/melis-core": "^5.2"
+	},
+	"autoload": {
+		"psr-4": {
+			"MelisReactOverride\\": "src/"
+		}
+	}
+}
