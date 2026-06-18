@@ -135,6 +135,19 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         $melisKeyJs = json_encode($melisKey);
         $melisKeyAttr = htmlspecialchars($melisKey, ENT_QUOTES);
         $zoneIdAttr   = htmlspecialchars($zoneId, ENT_QUOTES);
+
+        // Per-tool exceptions (NOT a generic rule): a few legacy tools render their content flush
+        // against the iframe edges. Add breathing room only for those, scoped by melisKey.
+        // `>` direct-child so it hits the single active pane in both states (initial render has the
+        // generateRec wrapper nested inside the buildToolPage pane; after a zoneReload+unwrap the
+        // wrapper IS the pane). Attribute names are case-insensitive, so [data-meliskey] matches
+        // both the buildToolPage `data-meliskey` and generateRec's `data-melisKey`.
+        $extraStyle = '';
+        if ($melisKey === 'meliscore_tool_other_config') {
+            $extraStyle = '
+    /* "Autres Configurations" — content sits flush to the edges; inset it. */
+    #melis-id-body-content-load > .tab-pane[data-meliskey="meliscore_tool_other_config"] { padding: 12px 24px 24px; }';
+        }
         $cssLinks = implode("\n", array_map(
             static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars($h, ENT_QUOTES) . '" />',
             $assets['css'] ?? []
@@ -171,6 +184,14 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Resolve RELATIVE tool URLs from the site root, like the classic back-office does. Legacy tool
+       JS sometimes builds AJAX URLs without a leading slash (e.g. MelisCmsStyle's modal:
+       "melis/MelisCms/ToolStyle/renderToolStyleModalContainer"). In the classic BO the page lives at
+       "/melis" (so relative → "/melis/..."), but this tool page lives at "/melis/react-tool-page",
+       so the same relative URL would resolve to "/melis/melis/..." → 404 (the front catches it and
+       renders the demo-site 404 under the tool). A <base href="/"> makes relatives resolve from root
+       → "/melis/..." again. Absolute URLs (our assets, most tool AJAX) are unaffected. -->
+  <base href="/" />
 {$cssLinks}
   <script>
   /* Neutralise bundle.js's "Remove Envato Frame" guard (line 35561):
@@ -245,14 +266,6 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
   })();
 {$inlineGlobals}
   </script>
-{$platformJs}
-  <script>
-  /* TinyMCE config preload — needs melis_tinymce.js (loaded just above). The nested page-edition
-     iframe reads window.parent.melisTinyMCE.tinyMceConfigs[type]; this page IS that parent.
-     melis_tinymce.js only auto-preloads when window.self === window.top (our Envato shim can fail
-     that test in Chrome), so trigger it explicitly. Idempotent; harmless if already preloaded. */
-  try { if (window.melisTinyMCE && melisTinyMCE.getTinyMceConfig) melisTinyMCE.getTinyMceConfig(); } catch(e) {}
-  </script>
   <style>
     html, body { margin: 0; padding: 0; background: transparent; }
     #content { margin-left: 0 !important; padding-left: 0 !important; width: 100% !important; }
@@ -266,7 +279,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        works underneath: panes switch via tabOpen/tabSwitch, and edit screens return to the list
        through the tool's own save/cancel buttons (which call tabClose). Only the visible strip
        is removed. !important beats any inline display the framework toggles. */
-    #melis-id-nav-bar-tabs { display: none !important; }
+    #melis-id-nav-bar-tabs { display: none !important; }{$extraStyle}
   </style>
 </head>
 <body>
@@ -278,6 +291,23 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
   </li>
 </ul>
 <a id="close-all-tab" style="display:none"></a>
+<!-- Base platform JS (bundle.js/jQuery + core extras) is loaded HERE — inside <body>, AFTER the
+     #melis-id-nav-bar-tabs strip but BEFORE the tool HTML — NOT in <head>. melisHelper (in bundle.js)
+     is an IIFE that CACHES selectors at load time (`var \$body = \$("body"); var \$navTabs =
+     \$("#melis-id-nav-bar-tabs");`). Loaded from <head> those caches are EMPTY (no <body> yet), which
+     silently breaks the tab framework: e.g. tabClose() reads \$navTabs.children("li").length (→ 0, so
+     it skips re-activating the previous tab) and \$navTabs.position().left (→ throws), leaving NO
+     active pane → blank tool after a save+zoneReload (e.g. the Emails tool). Placing it after the
+     strip fixes the caches; placing it before the tool HTML keeps jQuery available for the tool's
+     own inline <script> blocks. -->
+{$platformJs}
+  <script>
+  /* TinyMCE config preload — needs melis_tinymce.js (loaded just above). The nested page-edition
+     iframe reads window.parent.melisTinyMCE.tinyMceConfigs[type]; this page IS that parent.
+     melis_tinymce.js only auto-preloads when window.self === window.top (our Envato shim can fail
+     that test in Chrome), so trigger it explicitly. Idempotent; harmless if already preloaded. */
+  try { if (window.melisTinyMCE && melisTinyMCE.getTinyMceConfig) melisTinyMCE.getTinyMceConfig(); } catch(e) {}
+  </script>
 <div id="content">
   <div class="tab-content" id="melis-id-body-content-load">
     <div id="{$zoneIdAttr}" data-meliskey="{$melisKeyAttr}" class="tab-pane container-level-a active">
