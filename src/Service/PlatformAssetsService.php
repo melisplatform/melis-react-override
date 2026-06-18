@@ -61,6 +61,13 @@ class PlatformAssetsService
             // melisDataTable.js est déclaré dans app.interface.php mais absent de bundle.js.
             // Il expose window.melisDataTable (objet avec tableLanguage utilisé par les DataTables).
             '/MelisCore/js/core/melisDataTable.js',
+            // loader.js defines the global `loader` (page-edition loading overlay). It's a MelisCore
+            // ressource (app.interface meliscore) NOT in bundle.js, and buildToolPage skips meliscore
+            // ressources → without it window.loader is undefined. Tool handlers call
+            // window.parent.loader.addActivePageEditionLoading(...) on their FIRST line (e.g. the CMS
+            // page Save/Publish/Delete buttons), so a missing `loader` throws and the button silently
+            // does nothing. Load it so window.loader exists. (translations are loaded just above.)
+            '/MelisCore/js/core/loader.js',
             '/MelisCore/js/library/bootstrap-tags/bootstrap-tagsinput.js',
             '/MelisCore/js/library/bootstrap-tags/typeahead.bundle.js',
             '/MelisCore/js/moment/fr.js',

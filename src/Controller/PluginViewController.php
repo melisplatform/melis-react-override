@@ -89,12 +89,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // 'meliscore' because its resources are already in bundle.js (avoid double-load).
         // appConfigPath starts with a leading slash (e.g. "/meliscmsnews/interface/…"),
         // so the plugin key is the first segment AFTER trimming it.
+        // Module ressources (jsRessources) are kept SEPARATE from the base platform JS: the base
+        // (bundle.js/jQuery + core extras) loads in <head> so inline scripts inside the tool HTML
+        // work at parse time, while module ressources (e.g. melisCms.js) load at the END of <body>
+        // — they capture $("body") on load to bind delegated handlers, so <body> must exist first.
+        $assets['jsRessources'] = [];
         $pluginKey = explode('/', ltrim($appConfigPath, '/'))[0] ?? '';
         if ($pluginKey !== '' && strtolower($pluginKey) !== 'meliscore') {
             $resJs  = $melisAppConfig->getItem("/$pluginKey/ressources/js");
             $resCss = $melisAppConfig->getItem("/$pluginKey/ressources/css");
             if (is_array($resJs)) {
-                $assets['js'] = array_values(array_unique(array_merge($assets['js'], array_values($resJs))));
+                $assets['jsRessources'] = array_values(array_unique(array_values($resJs)));
             }
             if (is_array($resCss)) {
                 $assets['css'] = array_values(array_unique(array_merge($assets['css'], array_values($resCss))));
@@ -137,10 +142,19 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 
         $inlineGlobals = $assets['inline'] ?? '';
 
-        // Platform JS — blocking <script src> tags so they execute before tool scripts
+        // Platform JS (bundle.js/jQuery + core extras) — in <head> so inline scripts inside the
+        // tool HTML have jQuery & the platform globals at parse time.
         $platformJs = implode("\n", array_map(
             static fn($s) => '  <script src="' . htmlspecialchars($s, ENT_QUOTES) . '"></script>',
             $assets['js'] ?? []
+        ));
+
+        // Module ressources (e.g. melisCms.js) — at the END of <body>: they capture $("body") on
+        // load to bind delegated handlers, so <body> (and the tool HTML) must already exist, else
+        // the handlers attach to an empty set and the tool's buttons are dead.
+        $ressourceJs = implode("\n", array_map(
+            static fn($s) => '  <script src="' . htmlspecialchars($s, ENT_QUOTES) . '"></script>',
+            $assets['jsRessources'] ?? []
         ));
 
         // App-config jsCallbacks (e.g. setOnOff(), iframeMarketplaceCallback())
@@ -212,11 +226,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
           if (ct && ct.indexOf('json') === -1) return;
           var data = JSON.parse(xhr.responseText);
           if (!data || data.success === undefined) return;
+          var host = window.__melisRealParent || window.parent;
+          var tr = function(s){ try { return window.melisTranslator ? melisTranslator(s) : ((window.translations && translations[s]) || s); } catch(e){ return s; } };
+          // Generic tool-action result: the host can react to a tool's save (e.g. the CMS opens the
+          // newly created page + refreshes its tree). Carries the request URL + parsed JSON.
+          try { host.postMessage({ __melisToolResult: true, url: (xhr.responseURL || ''), data: data }, '*'); } catch(e) {}
           var msg = data.textMessage || '';
           if (!msg) return;
           var kind = (data.success == 1 || data.success === true) ? 'ok' : 'ko';
-          var host = window.__melisRealParent || window.parent;
-          host.postMessage({ __melisNotif: true, kind: kind, title: data.textTitle || '', message: msg }, '*');
+          // Translate title/message so this toast matches the one a tool fires via
+          // melisOkNotification (the host de-dups identical toasts). Without tr(), a tool answering a
+          // tr_ KEY produced TWO toasts: a raw "tr_…" one (here) + a translated one.
+          host.postMessage({ __melisNotif: true, kind: kind, title: tr(data.textTitle || ''), message: tr(msg) }, '*');
         } catch(e) {}
       });
       return _send.apply(this, arguments);
@@ -226,13 +247,10 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
   </script>
 {$platformJs}
   <script>
-  /* TinyMCE config preload for the page-edition iframe.
-     The nested page-edition iframe (/id/X/renderMode/melis) reads its editor config from
-     window.parent.melisTinyMCE.tinyMceConfigs[type] (melis_tinymce.js:38). This page IS that
-     parent. melis_tinymce.js only auto-preloads when window.self === window.top, but our
-     Envato shim's window.top override can silently fail in Chrome — so we trigger the preload
-     explicitly here. Without it the editor falls back to TinyMCE's default toolbar + "Upgrade"
-     instead of the rich Melis toolbar (html.php). Harmless if already preloaded (idempotent). */
+  /* TinyMCE config preload — needs melis_tinymce.js (loaded just above). The nested page-edition
+     iframe reads window.parent.melisTinyMCE.tinyMceConfigs[type]; this page IS that parent.
+     melis_tinymce.js only auto-preloads when window.self === window.top (our Envato shim can fail
+     that test in Chrome), so trigger it explicitly. Idempotent; harmless if already preloaded. */
   try { if (window.melisTinyMCE && melisTinyMCE.getTinyMceConfig) melisTinyMCE.getTinyMceConfig(); } catch(e) {}
   </script>
   <style>
@@ -271,6 +289,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      The classic BO layout provides it; our standalone tool page must too, or modal-based edits
      (e.g. editing a slide in MelisCmsSlider) silently fail (appended to an empty selector). -->
 <div id="melis-modals-container"></div>
+{$ressourceJs}
 <script>
   /* Initialise the active tab id so classic tool handlers (scroll, edit, categories…)
      that read the global activeTabId don't throw before any tab is opened. */
