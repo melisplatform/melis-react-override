@@ -300,18 +300,27 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
       // Collect ALL tab elements, including ones nested in a .nav-group-dropdown — some tools
       // (e.g. the Sites tool) open edit tabs grouped UNDER the primary tab instead of as direct
       // siblings, so iterating only bar's direct <li> children would miss them.
-      var tabs = [], els = bar.querySelectorAll('a.tab-element'), i, a, span, label;
+      // window.activeTabId is Melis' authoritative "current tab" (the .active class on the <a>
+      // is NOT reliable for record tabs — e.g. the slider keeps it on the list). Fall back to
+      // the class only if the global is unavailable.
+      var act = ''; try { act = window.activeTabId || ''; } catch(e) {}
+      var tabs = [], els = bar.querySelectorAll('a.tab-element'), i, a, span, label, did;
       for (i = 0; i < els.length; i++) {
         a = els[i];
         span = a.querySelector('.navtab-pagename');
-        label = ((span ? span.textContent : a.getAttribute('title')) || a.getAttribute('data-id') || '').trim();
-        tabs.push({ id: a.getAttribute('data-id') || '', label: label,
-                    active: a.classList.contains('active'), primary: (tabs.length === 0) });
+        did = a.getAttribute('data-id') || '';
+        label = ((span ? span.textContent : a.getAttribute('title')) || did || '').trim();
+        tabs.push({ id: did, label: label,
+                    active: act ? (did === act) : a.classList.contains('active'), primary: (tabs.length === 0) });
       }
       var host = window.__melisRealParent || window.parent;
       try { host.postMessage({ __melisToolTabs: true, melisKey: melisKey, tabs: tabs }, '*'); } catch(e) {}
     }
-    try { new MutationObserver(report).observe(bar, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] }); } catch(e) {}
+    // Debounce: a single tab action fires several mutations + an intermediate state where the
+    // list is briefly active again — coalesce them so the host settles on the final active tab
+    // (no URL flicker).
+    var _rt; function scheduleReport(){ try { clearTimeout(_rt); } catch(e) {} _rt = setTimeout(report, 60); }
+    try { new MutationObserver(scheduleReport).observe(bar, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] }); } catch(e) {}
     report();
     window.addEventListener('message', function(e){
       var d = e.data || {};
@@ -325,6 +334,9 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
           else { var c = bar.querySelector("a.close-tab[data-id='" + d.id + "']"); if (c) c.click(); } } catch(err) {}
         try { if (d.next && window.melisHelper && melisHelper.tabSwitch) melisHelper.tabSwitch(d.next); } catch(err) {}
       }
+      // A pure tab switch may not mutate the observed bar (active class can stay put) → report
+      // explicitly so the host's active tab (and the URL) follows.
+      try { scheduleReport(); } catch(err) {}
     });
   })();
   /* Notification bridge: tools fire green/red toasts via melisHelper.melisOkNotification /
