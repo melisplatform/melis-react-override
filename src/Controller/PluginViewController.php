@@ -93,18 +93,66 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // (bundle.js/jQuery + core extras) loads in <head> so inline scripts inside the tool HTML
         // work at parse time, while module ressources (e.g. melisCms.js) load at the END of <body>
         // — they capture $("body") on load to bind delegated handlers, so <body> must exist first.
+        // We need the ressources of EVERY app-config root this tool relies on — not just its own
+        // plugin root, but also any root reached through a `type` link inside the interface tree.
+        // Example: the Sites tool (root `meliscms`) wires its "Modules" tab via
+        // `'type' => 'melistoolsitesmoduleload/interface/…'`; that root's sitesModuleLoad.tool.js
+        // defines the jsCallback (moduleLoadJsCallback) + the activation-switch handlers. Injecting
+        // only the first plugin root left those scripts out → the jsCallback was undefined (and
+        // silently swallowed) → the activation toggles stayed raw checkboxes. Collect every root.
+        // `type` links are resolved by generateRec at render time, so getItem() returns them
+        // UNRESOLVED (just the path string). We must FOLLOW them recursively: the Sites tool chains
+        // meliscms_tool_sites → (type) …_edit_site → tabs → (type) melistoolsitesmoduleload, and the
+        // ressources we need (sitesModuleLoad.tool.js) live at that last root. Walk into each
+        // referenced subtree (guarded against cycles) and remember every root we reach.
         $assets['jsRessources'] = [];
+        $roots = [];
         $pluginKey = explode('/', ltrim($appConfigPath, '/'))[0] ?? '';
-        if ($pluginKey !== '' && strtolower($pluginKey) !== 'meliscore') {
-            $resJs  = $melisAppConfig->getItem("/$pluginKey/ressources/js");
-            $resCss = $melisAppConfig->getItem("/$pluginKey/ressources/css");
+        if ($pluginKey !== '') {
+            $roots[$pluginKey] = true;
+        }
+        $visited = [];
+        $collectTypeRoots = function ($node) use (&$collectTypeRoots, &$roots, &$visited, $melisAppConfig) {
+            if (!is_array($node)) {
+                return;
+            }
+            foreach ($node as $k => $v) {
+                if ($k === 'type' && is_string($v) && $v !== '') {
+                    $path = ltrim($v, '/');
+                    $root = explode('/', $path)[0] ?? '';
+                    if ($root !== '') {
+                        $roots[$root] = true;
+                    }
+                    if (!isset($visited[$path])) {
+                        $visited[$path] = true;
+                        $sub = $melisAppConfig->getItem('/' . $path);
+                        if (is_array($sub)) {
+                            $collectTypeRoots($sub);
+                        }
+                    }
+                } elseif (is_array($v)) {
+                    $collectTypeRoots($v);
+                }
+            }
+        };
+        $collectTypeRoots($appsConfig);
+
+        $jsRes = [];
+        foreach (array_keys($roots) as $root) {
+            // 'meliscore' ressources are already bundled in bundle.js → skip to avoid double-load.
+            if (strtolower($root) === 'meliscore') {
+                continue;
+            }
+            $resJs  = $melisAppConfig->getItem("/$root/ressources/js");
+            $resCss = $melisAppConfig->getItem("/$root/ressources/css");
             if (is_array($resJs)) {
-                $assets['jsRessources'] = array_values(array_unique(array_values($resJs)));
+                $jsRes = array_merge($jsRes, array_values($resJs));
             }
             if (is_array($resCss)) {
                 $assets['css'] = array_values(array_unique(array_merge($assets['css'], array_values($resCss))));
             }
         }
+        $assets['jsRessources'] = array_values(array_unique($jsRes));
 
         // Zone id of the initial tool (used as the first tab-pane id so the classic
         // tab framework — tabOpen/zoneReload/tabSwitch — can open edit tabs alongside it).
