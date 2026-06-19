@@ -68,6 +68,14 @@ class PlatformAssetsService
             // page Save/Publish/Delete buttons), so a missing `loader` throws and the button silently
             // does nothing. Load it so window.loader exists. (translations are loaded just above.)
             '/MelisCore/js/core/loader.js',
+            // findpage.tool.js defines the SHARED page picker `window.melisLinkTree`
+            // (melisLinkTree.createInputTreeModal opens the "select a page" tree modal). It lives in
+            // MelisCms but is reused by OTHER modules' tools (MelisCmsSlider, MelisCommerce…). Those
+            // tool pages only inject their own plugin ressources, so without this they throw
+            // "melisLinkTree is not defined" on the page-id picker button. Load it for every tool
+            // page (only needs jQuery + melisHelper at load; the modal's tree uses fancytree from
+            // bundle.js, and its relative AJAX URL resolves via the <base href="/">).
+            '/MelisCms/js/tools/findpage.tool.js',
             '/MelisCore/js/library/bootstrap-tags/bootstrap-tagsinput.js',
             '/MelisCore/js/library/bootstrap-tags/typeahead.bundle.js',
             '/MelisCore/js/moment/fr.js',
