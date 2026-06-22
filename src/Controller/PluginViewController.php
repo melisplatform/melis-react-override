@@ -322,6 +322,12 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        pane shows at a time (same behaviour as the real back-office). */
     #melis-id-body-content-load > .tab-pane { display: none; }
     #melis-id-body-content-load > .tab-pane.active { display: block; }
+    /* NESTED bootstrap tab widgets INSIDE a tool (e.g. the user-profile tabs Profil / Messenger):
+       hide inactive panes. The rule above only covers the shell's OWN direct-child panes; nested
+       .tab-content panes rely on Bootstrap's .tab-content>.tab-pane{display:none}, which isn't in
+       the iframe CSS, so without this every nested tab pane showed at once (all tabs stacked). */
+    .tab-content > .tab-pane:not(.active) { display: none; }
+    .tab-content > .tab-pane.active { display: block; }
     /* The classic in-iframe tool tab strip is NOT part of the new UI — hide it entirely,
        everywhere (lists, sub-lists, sub-sub-lists, pages, every tool). The tab framework still
        works underneath: panes switch via tabOpen/tabSwitch, and edit screens return to the list
@@ -384,6 +390,31 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
       z.find('.tab-content > div:first-child').addClass('active');
     }
   } catch(e) {}
+  /* NESTED tab widgets inside a tool (e.g. user-profile Profil/Messenger tabs): drive pane
+     switching explicitly. Bootstrap's tab toggle is unreliable in this standalone iframe — it
+     adds .active to the clicked pane but doesn't always remove it from the previously-active one,
+     so every visited tab stayed visible (all stacked). We don't preventDefault, so Bootstrap's own
+     shown.bs.tab (which legacy tools listen to, e.g. to lazy-load content) still fires. Capture
+     phase + idempotent: target pane/link active, siblings in the SAME group cleared. The hidden
+     shell strip (#melis-id-nav-bar-tabs) is never clicked, so this doesn't touch shell tabs. */
+  document.addEventListener('click', function(e){
+    var a = e.target && e.target.closest && e.target.closest('a[data-bs-toggle="tab"], a[data-toggle="tab"]');
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (href.charAt(0) !== '#') return;
+    var pane = document.getElementById(href.slice(1));
+    var tc = pane && pane.parentElement;
+    if (!tc) return;
+    Array.prototype.forEach.call(tc.children, function(c){
+      if (c.classList && c.classList.contains('tab-pane')) c.classList.remove('active', 'show');
+    });
+    pane.classList.add('active', 'show');
+    var li = a.closest('li');
+    var ul = li && li.parentElement;
+    if (ul) Array.prototype.forEach.call(ul.children, function(el){ if (el.classList) el.classList.remove('active'); });
+    a.classList.add('active');
+    if (li) li.classList.add('active');
+  }, true);
   /* Tool-tab bridge: the in-iframe tab strip (#melis-id-nav-bar-tabs) is hidden (CSS above);
      mirror its tabs to the React host's sub-tab bar (under the topbar, grouped under the tool)
      and drive pane switching from there. The host shows the tabs and posts back activate/close
