@@ -17,6 +17,18 @@ return [
                             ],
                         ],
                     ],
+                    // Renders a single legacy dashboard plugin as a minimal standalone HTML page
+                    // for use in an iframe inside the React dashboard.
+                    'react-dashboard-plugin' => [
+                        'type'    => 'Segment',
+                        'options' => [
+                            'route'    => 'react-dashboard-plugin',
+                            'defaults' => [
+                                'controller' => 'MelisCore\Controller\PluginView',
+                                'action'     => 'dashboardPluginPage',
+                            ],
+                        ],
+                    ],
                 ],
             ],
 

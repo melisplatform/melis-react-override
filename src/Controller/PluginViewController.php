@@ -77,6 +77,41 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 
         $html = $this->renderViewRec($zoneView);
 
+        // The MelisAI admin tool's Save button lives in a SHARED header zone (melisai_header),
+        // rendered by the composite tool (melisadmin_tool) as a sibling of the tab content, and
+        // it submits a SINGLE form (#melisAIPlatformForm, rendered by the Platform AI tab) plus
+        // MCP data collected from the DOM. When a single admin sub-tab is loaded standalone in
+        // the iframe, that header — and for non-Platform tabs the form too — is missing, so Save
+        // is absent / inert. Reusable helper to render any MelisAI admin zone by its melisKey.
+        $renderMelisZone = function (string $zoneMelisKey) use ($melisAppConfig, $melisKeys, $jsCallBacks): string {
+            $path = $melisKeys[$zoneMelisKey] ?? '';
+            if ($path === '') {
+                return '';
+            }
+            $zParts = explode('/', $path);
+            $zKey   = $zParts[count($zParts) - 1];
+            $zView  = $this->generateRec($zKey, $path, $jsCallBacks, []);
+            $zView->setVariable('zoneconfig', $melisAppConfig->getItem($path));
+            $zView->setVariable('parameters', []);
+            $zView->setVariable('keyInterface', $zKey);
+            return $this->renderViewRec($zView);
+        };
+
+        if ($key === 'melisai_platform_ai') {
+            // Platform AI already contains #melisAIPlatformForm → just add the header (Save).
+            $html = $renderMelisZone('melisai_header') . $html;
+        } elseif ($key === 'melisai_mcp_server') {
+            // The MCP save (.btnSaveMelisAIAdmin in admin.js) reads its data from the DOM
+            // (#mcp-database-tab / #mcp-exposition-tab) but submits #melisAIPlatformForm — which
+            // lives in the Platform AI tab, not here. Add the header (Save) and an EMPTY
+            // #melisAIPlatformForm so the submit fires; server-side AdminController::saveAction
+            // persists the MCP data independently and short-circuits to success for this
+            // MCP-only save (no platform fields), so no spurious platform-validation error.
+            $html = $renderMelisZone('melisai_header')
+                  . '<form id="melisAIPlatformForm"></form>'
+                  . $html;
+        }
+
         // ── Build the page ────────────────────────────────────────────────────
         $assets = \MelisReactOverride\Service\PlatformAssetsService::build($this->getServiceManager());
 
@@ -137,6 +172,38 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         };
         $collectTypeRoots($appsConfig);
 
+        // MelisSmallBusiness contributes action buttons to the CMS page editor (page-lock
+        // unlock, versioning, comments, workflow) through `forward` links — which the `type`
+        // walk above cannot reach. Their click handlers live in the melisSB ressources
+        // (e.g. pagelock.tool.js, whose delegated `a.btn-unlock-page` handler is otherwise
+        // never bound in the iframe → the "Débloquer la page" button does nothing).
+        // Add the melisSB root for the page editor so those buttons work. FULLY MODULAR: if
+        // MelisSmallBusiness is not installed, the button isn't rendered and the getItem()
+        // below returns null → no resource is injected (no phantom load).
+        if ($key === 'meliscms_page') {
+            $roots['melisSB'] = true;
+        }
+
+        // MelisAI tools that embed the AI chat (MelisAIChatViewHelper renders chat-view.phtml)
+        // depend on MelisAIEngine's tool.js — it defines window.runAgent and
+        // window.handleChatInlineStyles, called by the chat's INLINE script (at parse time) and
+        // by MelisAI's agent.js / generalChat.js. In the real BO that file is loaded as
+        // MelisAIEngine's own interface ressource on every page; the `type` walk above never
+        // reaches the melisaiengine root from a melisai tool. It must load in the HEAD (the
+        // `js` bucket), NOT at end-of-body (`jsRessources`), because the chat-view inline
+        // runAgent() call runs at parse time — end-of-body would be too late. FULLY MODULAR:
+        // if MelisAIEngine is absent, getItem() returns null → nothing injected.
+        if ($key === 'melisai_chat_dev_tool') {
+            $aiEngineJs = $melisAppConfig->getItem('/melisaiengine/ressources/js');
+            if (is_array($aiEngineJs)) {
+                $assets['js'] = array_values(array_unique(array_merge($assets['js'] ?? [], array_values($aiEngineJs))));
+            }
+            $aiEngineCss = $melisAppConfig->getItem('/melisaiengine/ressources/css');
+            if (is_array($aiEngineCss)) {
+                $assets['css'] = array_values(array_unique(array_merge($assets['css'] ?? [], array_values($aiEngineCss))));
+            }
+        }
+
         $jsRes = [];
         foreach (array_keys($roots) as $root) {
             // 'meliscore' ressources are already bundled in bundle.js → skip to avoid double-load.
@@ -157,6 +224,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // Zone id of the initial tool (used as the first tab-pane id so the classic
         // tab framework — tabOpen/zoneReload/tabSwitch — can open edit tabs alongside it).
         $zoneId = $appsConfig['conf']['id'] ?? ('id_' . $keyView);
+        // Legacy page tools derive the page id from the tab/zone id via activeTabId.split("_")[0],
+        // because the classic back-office opens a page edit in a tab whose pane id is
+        // "<idPage>_id_meliscms_page". The standalone iframe renders the tool directly with the bare
+        // conf.id ("id_meliscms_page"), so that split yielded "id" → wrong page id → e.g. the
+        // "Débloquer la page" handler (pagelock.tool.js) called isPageLock with a bogus id and
+        // silently died. Prefix the zone id with idPage to match the classic convention; DOM
+        // container id, activeTabId and zoneReload target all use $zoneId so they stay consistent.
+        $idPageParam = $request->getQuery('idPage', '');
+        if ($key === 'meliscms_page' && $idPageParam !== '' && $idPageParam !== null) {
+            $zoneId = $idPageParam . '_' . $zoneId;
+        }
         $page   = $this->buildToolPage($html, $jsCallBacks, $assets, $zoneId, $key);
 
         $response = $this->getResponse();
@@ -195,6 +273,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             $extraStyle = '
     /* "Autres Configurations" — content sits flush to the edges; inset it. */
     #melis-id-body-content-load > .tab-pane[data-meliskey="meliscore_tool_other_config"] { padding: 12px 24px 24px; }';
+        }
+
+        // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) only activates when
+        // melisCore.screenSize (= the iframe window width, set ONCE at load) is > 1120. That legacy
+        // threshold assumed the full-width classic BO; in the React BO the iframe is narrower (the
+        // page-tree sidebar takes ~256px), so on browser windows < ~1376px the iframe drops under
+        // 1120 and the toolbar never sticks — it just scrolls off-screen. Nudge screenSize past the
+        // gate so the EXISTING legacy sticky logic runs (no competing handler). Positioning still
+        // uses the real $body.width(), and the iframe is always a desktop tool view → safe to force.
+        $extraScript = '';
+        if ($melisKey === 'meliscms_page') {
+            $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize <= 1120) melisCore.screenSize = 1121; } catch(e) {}";
         }
         $cssLinks = implode("\n", array_map(
             static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars($h, ENT_QUOTES) . '" />',
@@ -271,6 +361,22 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     };
     ['toolUserManagement','melisCoreTool','melisHelper','melisDataTable'].forEach(_shim);
   })();
+  /* Shared: flatten a Melis error object {field:{label, 0:msg, …}} into a structured
+     [{label, messages:[…]}] list so the React host can render errors PER FIELD (which
+     fields are required) instead of one concatenated blob. */
+  window.__melisErrFields = function(errors){
+    var out = [];
+    try {
+      for (var k in errors){ if (k === 'label') continue; var e = errors[k];
+        var label = (e && typeof e === 'object' && e.label) ? e.label : ((errors && errors.label) || k);
+        var msgs = [];
+        if (e && typeof e === 'object'){ for (var kk in e){ if (kk !== 'label'){ var v = e[kk]; msgs.push((v && typeof v === 'object') ? (v[0] || '') : v); } } }
+        else if (e != null && e !== ''){ msgs.push(e); }
+        if (msgs.length) out.push({ label: label, messages: msgs });
+      }
+    } catch(ex){}
+    return out;
+  };
   /* bundle.js runs the dashboard bubble plugins' \$(document).ready everywhere,
      so inside a tool iframe they fire POST .../dashboard-plugin/<Plugin>/get*
      with a wrong base path → 404 noise. These calls are never legitimate in a
@@ -306,7 +412,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
           // Translate title/message so this toast matches the one a tool fires via
           // melisOkNotification (the host de-dups identical toasts). Without tr(), a tool answering a
           // tr_ KEY produced TWO toasts: a raw "tr_…" one (here) + a translated one.
-          host.postMessage({ __melisNotif: true, kind: kind, title: tr(data.textTitle || ''), message: tr(msg) }, '*');
+          host.postMessage({ __melisNotif: true, kind: kind, title: tr(data.textTitle || ''), message: tr(msg), fields: (kind === 'ko' ? window.__melisErrFields(data.errors) : []) }, '*');
         } catch(e) {}
       });
       return _send.apply(this, arguments);
@@ -333,7 +439,12 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        works underneath: panes switch via tabOpen/tabSwitch, and edit screens return to the list
        through the tool's own save/cancel buttons (which call tabClose). Only the visible strip
        is removed. !important beats any inline display the framework toggles. */
-    #melis-id-nav-bar-tabs { display: none !important; }{$extraStyle}
+    #melis-id-nav-bar-tabs { display: none !important; }
+    /* The CMS page-actions toolbar becomes position:fixed (.sticky-pageactions) on scroll with
+       top:47px — calibrated for the classic BO's 47px fixed top header, which does NOT exist inside
+       this standalone iframe (the React shell header is outside the iframe). So the bar floated 47px
+       below the top. Pin it to the iframe top. Scoped to .sticky-pageactions → no effect on other tools. */
+    .sticky-pageactions { top: 0 !important; }{$extraStyle}
   </style>
 </head>
 <body>
@@ -377,7 +488,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 <script>
   /* Initialise the active tab id so classic tool handlers (scroll, edit, categories…)
      that read the global activeTabId don't throw before any tab is opened. */
-  try { window.activeTabId = {$zoneIdJs}; } catch(e) {}
+  try { window.activeTabId = {$zoneIdJs}; } catch(e) {}{$extraScript}
   /* Activate the first inner tab + its pane of each tab group, exactly like the classic zone
      loader does after a zoneReload (melisHelper.js:725-726). Tools/pages render their .nav-tabs
      with NO active tab in the markup (render-pagetab.phtml) and rely on this JS — without it the
@@ -473,19 +584,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      (top-left), consistent and above the iframes. */
   (function(){
     function tr(s){ try { return window.melisTranslator ? melisTranslator(s) : ((window.translations && translations[s]) || s); } catch(e){ return s; } }
-    function send(kind, title, message){
+    function send(kind, title, message, fields){
       var host = window.__melisRealParent || window.parent;
-      try { host.postMessage({ __melisNotif: true, kind: kind, title: tr(title) || '', message: message || '' }, '*'); } catch(e) {}
+      try { host.postMessage({ __melisNotif: true, kind: kind, title: tr(title) || '', message: message || '', fields: fields || [] }, '*'); } catch(e) {}
     }
     function install(){
       if (!window.melisHelper) return false;
       melisHelper.melisOkNotification = function(title, message){ send('ok', title, tr(message)); };
+      // Keep the base message; forward errors STRUCTURED (per field) so the host renders a
+      // helpful "Field: error" list — same base message as the XHR bridge → host de-dups to one.
       melisHelper.melisKoNotification = function(title, message, errors){
-        var msg = tr(message) || '';
-        try { for (var k in errors){ if (k === 'label') continue; var e = errors[k];
-          if (e && typeof e === 'object'){ for (var kk in e){ if (kk !== 'label') msg += (msg ? ' — ' : '') + e[kk]; } }
-          else if (e){ msg += (msg ? ' — ' : '') + e; } } } catch(ex){}
-        send('ko', title, msg);
+        send('ko', title, tr(message) || '', window.__melisErrFields(errors));
       };
       return true;
     }
@@ -496,6 +605,117 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 </body>
 </html>
 HTML;
+    }
+
+    /**
+     * Renders a single legacy dashboard plugin (e.g. CheckWsStatusPlugin) as a
+     * minimal standalone HTML page for use in a React dashboard iframe widget.
+     *
+     * Usage:  GET /melis/react-dashboard-plugin?plugin=CheckWsStatusPlugin
+     */
+    public function dashboardPluginPageAction()
+    {
+        $pluginName = $this->getRequest()->getQuery('plugin', '');
+        if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
+            $this->getResponse()->setStatusCode(400);
+            return $this->getResponse();
+        }
+
+        $sm             = $this->getServiceManager();
+        $melisAppConfig = $sm->get('MelisCoreConfig');
+        $melisKeys      = $melisAppConfig->getMelisKeys();
+        $appConfigPath  = $melisKeys[$pluginName] ?? null;
+
+        if (!$appConfigPath) {
+            $this->getResponse()->setStatusCode(404);
+            return $this->getResponse();
+        }
+
+        $parts   = explode('/', $appConfigPath);
+        $keyView = $parts[count($parts) - 1];
+
+        $appsConfig = $melisAppConfig->getItem($appConfigPath);
+        [$jsCallBacks] = $melisAppConfig->getJsCallbacksDatas($appsConfig);
+
+        $this->getRequest()->getHeaders()->addHeaderLine('X-Requested-With', 'XMLHttpRequest');
+
+        $zoneView = $this->generateRec($keyView, $appConfigPath, $jsCallBacks, []);
+        $zoneView->setVariable('zoneconfig', $appsConfig);
+        $zoneView->setVariable('parameters', []);
+        $zoneView->setVariable('keyInterface', $keyView);
+
+        if (!empty($zoneView->getVariable('jsCallBacks')) && is_array($zoneView->getVariable('jsCallBacks'))) {
+            $jsCallBacks = \Laminas\Stdlib\ArrayUtils::merge($zoneView->getVariable('jsCallBacks'), $jsCallBacks);
+            $jsCallBacks = array_unique($jsCallBacks);
+        }
+
+        $html   = $this->renderViewRec($zoneView);
+        $assets = \MelisReactOverride\Service\PlatformAssetsService::build($sm);
+
+        // Collect module-specific resources (same logic as toolPageAction).
+        $pluginKey = explode('/', ltrim($appConfigPath, '/'))[0] ?? '';
+        $jsRes = [];
+        if ($pluginKey !== '' && strtolower($pluginKey) !== 'meliscore') {
+            $resJs  = $melisAppConfig->getItem("/$pluginKey/ressources/js");
+            $resCss = $melisAppConfig->getItem("/$pluginKey/ressources/css");
+            if (is_array($resJs))  { $jsRes = array_values($resJs); }
+            if (is_array($resCss)) {
+                $assets['css'] = array_values(array_unique(array_merge($assets['css'], array_values($resCss))));
+            }
+        }
+
+        $cssLinks = implode("\n", array_map(
+            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars($h, ENT_QUOTES) . '" />',
+            $assets['css'] ?? []
+        ));
+        $headJs = implode("\n", array_map(
+            static fn($h) => '  <script src="' . htmlspecialchars($h, ENT_QUOTES) . '"></script>',
+            $assets['js'] ?? []
+        ));
+        $bodyJs = implode("\n", array_map(
+            static fn($h) => '  <script src="' . htmlspecialchars($h, ENT_QUOTES) . '"></script>',
+            $jsRes
+        ));
+        $callbackBlocks = implode("\n", array_map(
+            static fn($cb) => "<script>\n(function(){\ntry{\n{$cb}\n}catch(e){console.warn(e);}\n})();\n</script>",
+            $jsCallBacks
+        ));
+
+        $inlineGlobals = $assets['inline'] ?? '';
+
+        $page = <<<HTML
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>body { margin: 0; overflow: auto; } .widget-header-content, .widget-header-actions { display: none !important; }</style>
+  <script>
+  /* Neutralise bundle.js "Remove Envato Frame" guard — same shim as toolPageAction. */
+  try { window.__melisRealParent = window.parent; } catch(e) {}
+  try {
+    Object.defineProperty(window, 'parent', { get: function(){ return window; }, configurable: true });
+    Object.defineProperty(window, 'top',    { get: function(){ return window; }, configurable: true });
+  } catch(e) {}
+{$inlineGlobals}
+  </script>
+{$cssLinks}
+{$headJs}
+</head>
+<body>
+{$html}
+{$bodyJs}
+{$callbackBlocks}
+</body>
+</html>
+HTML;
+
+        $response = $this->getResponse();
+        $response->setContent($page);
+        $response->getHeaders()
+            ->addHeaderLine('Content-Type',  'text/html; charset=utf-8')
+            ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN');
+        return $response;
     }
 
     public function generateAction()
