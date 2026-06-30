@@ -220,6 +220,19 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             }
         }
 
+        // The melisadmin_tool composite page contains inline scripts (e.g. the usage chart's
+        // drawChart() call) that execute at parse time, before end-of-body jsRessources load.
+        // In the classic BO all module ressources are in the <head> so those globals exist
+        // at parse time. Replicate that: also inject the melisai JS ressources into the `js`
+        // (head) bucket so drawChart and other melisai globals are defined when the HTML parses.
+        // FULLY MODULAR: if the key or ressources are absent, nothing is injected.
+        if ($key === 'melisadmin_tool') {
+            $melisAiJs = $melisAppConfig->getItem('/melisai/ressources/js');
+            if (is_array($melisAiJs)) {
+                $assets['js'] = array_values(array_unique(array_merge($assets['js'] ?? [], array_values($melisAiJs))));
+            }
+        }
+
         $jsRes = [];
         foreach (array_keys($roots) as $root) {
             // 'meliscore' ressources are already bundled in bundle.js → skip to avoid double-load.
