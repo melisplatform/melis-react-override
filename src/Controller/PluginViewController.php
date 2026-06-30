@@ -101,14 +101,30 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             // Platform AI already contains #melisAIPlatformForm → just add the header (Save).
             $html = $renderMelisZone('melisai_header') . $html;
         } elseif ($key === 'melisai_mcp_server') {
-            // The MCP save (.btnSaveMelisAIAdmin in admin.js) reads its data from the DOM
-            // (#mcp-database-tab / #mcp-exposition-tab) but submits #melisAIPlatformForm — which
-            // lives in the Platform AI tab, not here. Add the header (Save) and an EMPTY
-            // #melisAIPlatformForm so the submit fires; server-side AdminController::saveAction
-            // persists the MCP data independently and short-circuits to success for this
-            // MCP-only save (no platform fields), so no spurious platform-validation error.
+            // Use the LEGACY save (.btnSaveMelisAIAdmin in the header → /melis/MelisAI/Admin/save).
+            // It submits #melisAIPlatformForm + the MCP DOM data. The Platform AI form isn't on this
+            // tab, so provide #melisAIPlatformForm pre-filled with the CURRENT platform values as
+            // HIDDEN inputs (read from the active default model). Platform validation then passes
+            // (a no-op re-save of the same values) and the MCP data persists — no legacy controller
+            // change, no react-api call. Hidden inputs always submit (no JS init needed, unlike the
+            // real form's switches/radios).
+            $platformHidden = '';
+            try {
+                $modelTable = $this->getServiceManager()->get('MelisAIEngineModelTable');
+                $model      = $modelTable->getEntryByField('mam_is_default', 1)->current();
+                if ($model) {
+                    $model  = (array) $model;
+                    $fields = ['mam_status', 'mam_is_default', 'mam_macp_id', 'mam_id',
+                               'mam_same_keys_platforms', 'mam_file_user_active', 'mam_file_context_active',
+                               'mam_file_max_size_mb', 'mam_file_upload_mode', 'mam_internal_upload'];
+                    foreach ($fields as $f) {
+                        $platformHidden .= '<input type="hidden" name="' . $f . '" value="'
+                                         . htmlspecialchars((string) ($model[$f] ?? ''), ENT_QUOTES) . '">';
+                    }
+                }
+            } catch (\Throwable) {}
             $html = $renderMelisZone('melisai_header')
-                  . '<form id="melisAIPlatformForm"></form>'
+                  . '<form id="melisAIPlatformForm">' . $platformHidden . '</form>'
                   . $html;
         }
 
@@ -377,6 +393,15 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     } catch(ex){}
     return out;
   };
+  /* The MCP Server (Old) tab reuses the legacy Platform-AI save, so its success notification
+     carries the platform message ("Platform AI configuration saved successfully"). Rewrite it
+     to an MCP-specific message for this tab only — purely cosmetic, in our layer. */
+  window.__melisMapNotif = function(kind, title, message){
+    if ({$melisKeyJs} === 'melisai_mcp_server' && kind === 'ok') {
+      return { title: 'MCP Server', message: 'MCP Server configuration saved successfully' };
+    }
+    return { title: title || '', message: message || '' };
+  };
   /* bundle.js runs the dashboard bubble plugins' \$(document).ready everywhere,
      so inside a tool iframe they fire POST .../dashboard-plugin/<Plugin>/get*
      with a wrong base path → 404 noise. These calls are never legitimate in a
@@ -412,7 +437,8 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
           // Translate title/message so this toast matches the one a tool fires via
           // melisOkNotification (the host de-dups identical toasts). Without tr(), a tool answering a
           // tr_ KEY produced TWO toasts: a raw "tr_…" one (here) + a translated one.
-          host.postMessage({ __melisNotif: true, kind: kind, title: tr(data.textTitle || ''), message: tr(msg), fields: (kind === 'ko' ? window.__melisErrFields(data.errors) : []) }, '*');
+          var _m = window.__melisMapNotif(kind, tr(data.textTitle || ''), tr(msg));
+          host.postMessage({ __melisNotif: true, kind: kind, title: _m.title, message: _m.message, fields: (kind === 'ko' ? window.__melisErrFields(data.errors) : []) }, '*');
         } catch(e) {}
       });
       return _send.apply(this, arguments);
@@ -586,7 +612,8 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     function tr(s){ try { return window.melisTranslator ? melisTranslator(s) : ((window.translations && translations[s]) || s); } catch(e){ return s; } }
     function send(kind, title, message, fields){
       var host = window.__melisRealParent || window.parent;
-      try { host.postMessage({ __melisNotif: true, kind: kind, title: tr(title) || '', message: message || '', fields: fields || [] }, '*'); } catch(e) {}
+      var _m = window.__melisMapNotif(kind, tr(title) || '', message || '');
+      try { host.postMessage({ __melisNotif: true, kind: kind, title: _m.title, message: _m.message, fields: fields || [] }, '*'); } catch(e) {}
     }
     function install(){
       if (!window.melisHelper) return false;
