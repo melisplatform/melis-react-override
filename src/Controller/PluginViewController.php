@@ -226,7 +226,8 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // at parse time. Replicate that: also inject the melisai JS ressources into the `js`
         // (head) bucket so drawChart and other melisai globals are defined when the HTML parses.
         // FULLY MODULAR: if the key or ressources are absent, nothing is injected.
-        if ($key === 'melisadmin_tool') {
+        // melis_mcp_inspector_tool also calls mcpInspectorInit() inline at parse time.
+        if ($key === 'melisadmin_tool' || $key === 'melis_mcp_inspector_tool') {
             $melisAiJs = $melisAppConfig->getItem('/melisai/ressources/js');
             if (is_array($melisAiJs)) {
                 $assets['js'] = array_values(array_unique(array_merge($assets['js'] ?? [], array_values($melisAiJs))));
