@@ -29,6 +29,18 @@ return [
                             ],
                         ],
                     ],
+                    // Config form (cog button) of a legacy dashboard plugin — standalone HTML
+                    // for an iframe inside the React config dialog.
+                    'react-dashboard-plugin-config' => [
+                        'type'    => 'Segment',
+                        'options' => [
+                            'route'    => 'react-dashboard-plugin-config',
+                            'defaults' => [
+                                'controller' => 'MelisCore\Controller\PluginView',
+                                'action'     => 'dashboardPluginConfigPage',
+                            ],
+                        ],
+                    ],
                 ],
             ],
 
@@ -74,6 +86,9 @@ return [
             'datas' => [
                 'excluded_routes' => [
                     'meliscore-melis-react-spa',
+                    // Lecture publique du thème React (branding du panneau gauche du login,
+                    // affiché AVANT authentification). Seul le GET est exclu ; le /save reste protégé.
+                    'melis-backoffice/melis-react-api/platformscheme-react-get',
                 ],
             ],
         ],

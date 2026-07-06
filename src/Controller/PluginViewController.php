@@ -77,55 +77,12 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 
         $html = $this->renderViewRec($zoneView);
 
-        // The MelisAI admin tool's Save button lives in a SHARED header zone (melisai_header),
-        // rendered by the composite tool (melisadmin_tool) as a sibling of the tab content, and
-        // it submits a SINGLE form (#melisAIPlatformForm, rendered by the Platform AI tab) plus
-        // MCP data collected from the DOM. When a single admin sub-tab is loaded standalone in
-        // the iframe, that header — and for non-Platform tabs the form too — is missing, so Save
-        // is absent / inert. Reusable helper to render any MelisAI admin zone by its melisKey.
-        $renderMelisZone = function (string $zoneMelisKey) use ($melisAppConfig, $melisKeys, $jsCallBacks): string {
-            $path = $melisKeys[$zoneMelisKey] ?? '';
-            if ($path === '') {
-                return '';
-            }
-            $zParts = explode('/', $path);
-            $zKey   = $zParts[count($zParts) - 1];
-            $zView  = $this->generateRec($zKey, $path, $jsCallBacks, []);
-            $zView->setVariable('zoneconfig', $melisAppConfig->getItem($path));
-            $zView->setVariable('parameters', []);
-            $zView->setVariable('keyInterface', $zKey);
-            return $this->renderViewRec($zView);
-        };
-
-        if ($key === 'melisai_platform_ai') {
-            // Platform AI already contains #melisAIPlatformForm → just add the header (Save).
-            $html = $renderMelisZone('melisai_header') . $html;
-        } elseif ($key === 'melisai_mcp_server') {
-            // Use the LEGACY save (.btnSaveMelisAIAdmin in the header → /melis/MelisAI/Admin/save).
-            // It submits #melisAIPlatformForm + the MCP DOM data. The Platform AI form isn't on this
-            // tab, so provide #melisAIPlatformForm pre-filled with the CURRENT platform values as
-            // HIDDEN inputs (read from the active default model). Platform validation then passes
-            // (a no-op re-save of the same values) and the MCP data persists — no legacy controller
-            // change, no react-api call. Hidden inputs always submit (no JS init needed, unlike the
-            // real form's switches/radios).
-            $platformHidden = '';
-            try {
-                $modelTable = $this->getServiceManager()->get('MelisAIEngineModelTable');
-                $model      = $modelTable->getEntryByField('mam_is_default', 1)->current();
-                if ($model) {
-                    $model  = (array) $model;
-                    $fields = ['mam_status', 'mam_is_default', 'mam_macp_id', 'mam_id',
-                               'mam_same_keys_platforms', 'mam_file_user_active', 'mam_file_context_active',
-                               'mam_file_max_size_mb', 'mam_file_upload_mode', 'mam_internal_upload'];
-                    foreach ($fields as $f) {
-                        $platformHidden .= '<input type="hidden" name="' . $f . '" value="'
-                                         . htmlspecialchars((string) ($model[$f] ?? ''), ENT_QUOTES) . '">';
-                    }
-                }
-            } catch (\Throwable) {}
-            $html = $renderMelisZone('melisai_header')
-                  . '<form id="melisAIPlatformForm">' . $platformHidden . '</form>'
-                  . $html;
+        // Module-owned HTML adjustments (e.g. MelisAI prepending its shared admin header/save-form
+        // to a standalone sub-tab). See PluginViewToolPageExtensionInterface for the contract —
+        // modules register themselves via config('melis_react_override')['toolpage_extensions'],
+        // no edit to this file needed for new module-specific cases.
+        foreach ($this->toolPageExtensions() as $extension) {
+            $html = $extension->adjustToolHtml($key, $html, $jsCallBacks, $this);
         }
 
         // ── Build the page ────────────────────────────────────────────────────
@@ -200,53 +157,36 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             $roots['melisSB'] = true;
         }
 
-        // MelisAI tools that embed the AI chat (MelisAIChatViewHelper renders chat-view.phtml)
-        // depend on MelisAIEngine's tool.js — it defines window.runAgent and
-        // window.handleChatInlineStyles, called by the chat's INLINE script (at parse time) and
-        // by MelisAI's agent.js / generalChat.js. In the real BO that file is loaded as
-        // MelisAIEngine's own interface ressource on every page; the `type` walk above never
-        // reaches the melisaiengine root from a melisai tool. It must load in the HEAD (the
-        // `js` bucket), NOT at end-of-body (`jsRessources`), because the chat-view inline
-        // runAgent() call runs at parse time — end-of-body would be too late. FULLY MODULAR:
-        // if MelisAIEngine is absent, getItem() returns null → nothing injected.
-        if ($key === 'melisai_chat_dev_tool') {
-            $aiEngineJs = $melisAppConfig->getItem('/melisaiengine/ressources/js');
-            if (is_array($aiEngineJs)) {
-                $assets['js'] = array_values(array_unique(array_merge($assets['js'] ?? [], array_values($aiEngineJs))));
-            }
-            $aiEngineCss = $melisAppConfig->getItem('/melisaiengine/ressources/css');
-            if (is_array($aiEngineCss)) {
-                $assets['css'] = array_values(array_unique(array_merge($assets['css'] ?? [], array_values($aiEngineCss))));
-            }
-        }
-
-        // The melisadmin_tool composite page contains inline scripts (e.g. the usage chart's
-        // drawChart() call) that execute at parse time, before end-of-body jsRessources load.
-        // In the classic BO all module ressources are in the <head> so those globals exist
-        // at parse time. Replicate that: also inject the melisai JS ressources into the `js`
-        // (head) bucket so drawChart and other melisai globals are defined when the HTML parses.
-        // FULLY MODULAR: if the key or ressources are absent, nothing is injected.
-        // melis_mcp_inspector_tool also calls mcpInspectorInit() inline at parse time.
-        if ($key === 'melisadmin_tool' || $key === 'melis_mcp_inspector_tool') {
-            $melisAiJs = $melisAppConfig->getItem('/melisai/ressources/js');
-            if (is_array($melisAiJs)) {
-                $assets['js'] = array_values(array_unique(array_merge($assets['js'] ?? [], array_values($melisAiJs))));
-            }
+        // Module-owned asset adjustments (e.g. MelisAI forcing its module JS into the <head>
+        // bucket for inline scripts that need the globals at parse time). $skipJsRoots lets an
+        // extension mark a plugin root as "already injected" so the generic end-of-body loop
+        // below doesn't re-add its JS — re-adding would double the <script> tag and double-bind
+        // any delegated jQuery handlers it registers (e.g. two AJAX calls per click). See
+        // PluginViewToolPageExtensionInterface — no edit to this file needed for new cases.
+        $skipJsRoots = [];
+        foreach ($this->toolPageExtensions() as $extension) {
+            $result      = $extension->adjustToolAssets($key, $html, $assets, $this);
+            $assets      = $result['assets'] ?? $assets;
+            $skipJsRoots = array_merge($skipJsRoots, $result['skipJsRoots'] ?? []);
         }
 
         $jsRes = [];
         foreach (array_keys($roots) as $root) {
-            // 'meliscore' ressources are already bundled in bundle.js → skip to avoid double-load.
+            // 'meliscore' ressources (JS + CSS) are already bundled in bundle.js → skip entirely
+            // to avoid double-load.
             if (strtolower($root) === 'meliscore') {
                 continue;
             }
-            $resJs  = $melisAppConfig->getItem("/$root/ressources/js");
             $resCss = $melisAppConfig->getItem("/$root/ressources/css");
-            if (is_array($resJs)) {
-                $jsRes = array_merge($jsRes, array_values($resJs));
-            }
             if (is_array($resCss)) {
                 $assets['css'] = array_values(array_unique(array_merge($assets['css'], array_values($resCss))));
+            }
+            if (isset($skipJsRoots[$root])) {
+                continue;
+            }
+            $resJs = $melisAppConfig->getItem("/$root/ressources/js");
+            if (is_array($resJs)) {
+                $jsRes = array_merge($jsRes, array_values($resJs));
             }
         }
         $assets['jsRessources'] = array_values(array_unique($jsRes));
@@ -273,6 +213,40 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             ->addHeaderLine('Content-Type',  'text/html; charset=utf-8')
             ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN');
         return $response;
+    }
+
+    /** @var PluginViewToolPageExtensionInterface[]|null */
+    private ?array $toolPageExtensionsCache = null;
+
+    /**
+     * Resolves the module-registered toolPageAction() extensions (see
+     * PluginViewToolPageExtensionInterface). Modules opt in via
+     * config('melis_react_override')['toolpage_extensions'][] = '<service manager name>' — a
+     * plain config array entry, so contributions from different modules just accumulate
+     * regardless of module load order (unlike overriding a controller alias, which only the
+     * last-merged module wins). Silently skips names that aren't registered services or don't
+     * implement the interface, so an extension is fully optional (module not installed → no-op).
+     *
+     * @return PluginViewToolPageExtensionInterface[]
+     */
+    private function toolPageExtensions(): array
+    {
+        if ($this->toolPageExtensionsCache !== null) {
+            return $this->toolPageExtensionsCache;
+        }
+        $sm    = $this->getServiceManager();
+        $names = $sm->get('Config')['melis_react_override']['toolpage_extensions'] ?? [];
+        $extensions = [];
+        foreach ((array) $names as $name) {
+            if (!is_string($name) || !$sm->has($name)) {
+                continue;
+            }
+            $extension = $sm->get($name);
+            if ($extension instanceof PluginViewToolPageExtensionInterface) {
+                $extensions[] = $extension;
+            }
+        }
+        return $this->toolPageExtensionsCache = $extensions;
     }
 
     /**
@@ -730,6 +704,11 @@ HTML;
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Résout les URLs RELATIVES depuis la racine (comme toolPageAction). Sans ça, le plugin est
+       chargé depuis "/melis/react-dashboard-plugin?plugin=X", donc un lien/AJAX relatif du legacy
+       (ex. moxiemanager skin CSS, ou "melis/dashboard-plugin/…") se résout contre cette URL →
+       "/melis/melis/dashboard-plugin/…" (404) ou une CSS renvoyant du HTML. <base href="/"> corrige. -->
+  <base href="/" />
   <style>body { margin: 0; overflow: auto; } .widget-header-content, .widget-header-actions { display: none !important; }</style>
   <script>
   /* Neutralise bundle.js "Remove Envato Frame" guard — same shim as toolPageAction. */
@@ -737,6 +716,42 @@ HTML;
   try {
     Object.defineProperty(window, 'parent', { get: function(){ return window; }, configurable: true });
     Object.defineProperty(window, 'top',    { get: function(){ return window; }, configurable: true });
+  } catch(e) {}
+  /* bundle.js lance les plugins de bulles (News/Notifications/Chat) partout → dans cette iframe
+     ils POSTent .../dashboard-plugin/<Plugin>/get* avec une mauvaise base → 404. Le dashboard React
+     a sa PROPRE API de bulles ; ces appels ne sont jamais légitimes ici → on les avale au niveau XHR. */
+  (function(){
+    var _open = XMLHttpRequest.prototype.open;
+    var _send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url){
+      this.__melisBlocked = (typeof url === 'string' && url.indexOf('/dashboard-plugin/') !== -1);
+      return _open.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(){
+      if (this.__melisBlocked) return;
+      return _send.apply(this, arguments);
+    };
+  })();
+  /* moxiemanager (chargé par des widgets à base de TinyMCE, ex. MelisSBWorkflowPlugin) calcule l'URL
+     de sa skin CSS lui-même et IGNORE <base> → il injecte une <link> cassée pointant vers
+     "…react-dashboard-plugin?plugin=…/skins/*.css" (renvoie du HTML → "Refused to apply style").
+     Une telle feuille de style n'est jamais valide → on retire ces <link> dès leur insertion. */
+  try {
+    var _isBad = function(n){ return n && n.tagName === 'LINK' && (n.getAttribute('href') || '').indexOf('react-dashboard-plugin?plugin=') !== -1; };
+    var _kill  = function(n){ if (_isBad(n)) { try { n.remove(); } catch(e) {} } };
+    /* Empêche AUSSI la création de la <link> cassée en amont (moxman fait souvent
+       document.createElement('link') + setAttribute('href', …)) : on intercepte setAttribute. */
+    var _setAttr = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value){
+      if (this.tagName === 'LINK' && name === 'href' && typeof value === 'string' && value.indexOf('react-dashboard-plugin?plugin=') !== -1) return;
+      return _setAttr.apply(this, arguments);
+    };
+    new MutationObserver(function(muts){
+      muts.forEach(function(m){
+        if (m.type === 'attributes') { _kill(m.target); }
+        if (m.addedNodes) { Array.prototype.forEach.call(m.addedNodes, _kill); }
+      });
+    }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
   } catch(e) {}
 {$inlineGlobals}
   </script>
@@ -747,6 +762,129 @@ HTML;
 {$html}
 {$bodyJs}
 {$callbackBlocks}
+</body>
+</html>
+HTML;
+
+        $response = $this->getResponse();
+        $response->setContent($page);
+        $response->getHeaders()
+            ->addHeaderLine('Content-Type',  'text/html; charset=utf-8')
+            ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN');
+        return $response;
+    }
+
+    /**
+     * Page HTML autonome (pour iframe dans une modale React) affichant le FORMULAIRE DE
+     * CONFIGURATION d'un plugin dashboard legacy — équivalent React du bouton engrenage
+     * (`dashboard-plugin-properties` → renderDashboardPluginModal) de gridstack.init.js.
+     *
+     * On réutilise `createOptionsForms()` du plugin (via ControllerPluginManager) pour obtenir
+     * les onglets de config, exactement comme renderDashboardPluginModalAction. Beaucoup de
+     * plugins n'ont AUCUNE option (onglet `empty`) → on affiche alors un message "aucune option".
+     * Le POST de sauvegarde vers le back React (persistance par-plugin) reste un chantier séparé :
+     * ici on rend le formulaire tel quel (parité visuelle + lecture).
+     *
+     * GET /melis/react-dashboard-plugin-config?plugin=<PluginName>
+     */
+    public function dashboardPluginConfigPageAction()
+    {
+        $pluginName = $this->getRequest()->getQuery('plugin', '');
+        if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
+            $this->getResponse()->setStatusCode(400);
+            return $this->getResponse();
+        }
+
+        $sm = $this->getServiceManager();
+
+        // Récupère les onglets de config du plugin (même chemin que la modale legacy).
+        $tabs = [];
+        try {
+            $melisPlugin = $sm->get('ControllerPluginManager')->get($pluginName);
+            $melisPlugin->setUpdatesPluginConfig(['dashboard_id' => 'react_dashboard', 'plugin_id' => $pluginName]);
+            $melisPlugin->getPluginConfig();
+            $tabs = $melisPlugin->createOptionsForms();
+        } catch (\Throwable $e) {
+            $tabs = [];
+        }
+
+        $translator = null;
+        try { $translator = $sm->get('translator'); } catch (\Throwable) {}
+        $tr = static function (string $key) use ($translator): string {
+            if (!$translator) return $key;
+            try { $t = (string) $translator->translate($key); return $t !== '' ? $t : $key; } catch (\Throwable) { return $key; }
+        };
+
+        // Assemble le HTML des onglets (barre d'onglets si >1) + repère si toute la config est vide.
+        $allEmpty = true;
+        // Reproduit EXACTEMENT la structure de la modale legacy (render-dashboard-plugin-modal.phtml) :
+        // wizard > widget widget-tabs widget-tabs-double … — c'est ce que le CSS Melis stylise. Sans ce
+        // wrapper, les onglets/formulaires n'avaient pas le rendu Melis attendu.
+        $navHtml = '';
+        $paneHtml = '';
+        foreach ($tabs as $i => $tab) {
+            if (empty($tab['empty'])) { $allEmpty = false; }
+            $name   = htmlspecialchars((string) ($tab['name'] ?? ('Tab ' . ($i + 1))), ENT_QUOTES);
+            $icon   = !empty($tab['icon']) ? '<i class="' . htmlspecialchars((string) $tab['icon'], ENT_QUOTES) . '"></i> ' : '';
+            $active = $i === 0 ? ' active' : '';
+            $navHtml  .= "<li class=\"nav-item{$active}\"><a href=\"#plugin_modal_id_tab_{$i}\" class=\"nav-link f-awesome{$active}\" data-bs-toggle=\"tab\" aria-expanded=\"true\" title=\"{$name}\">{$icon}{$name}</a></li>";
+            $paneHtml .= "<div class=\"tab-pane{$active}\" id=\"plugin_modal_id_tab_{$i}\"><div class=\"row\"><div class=\"col-md-12\"><div class=\"plugin-container\">" . ($tab['html'] ?? '') . "</div></div></div></div>";
+        }
+        if ($tabs === []) {
+            $navHtml  = '<li class="nav-item active"><a href="#plugin_modal_id_tab_0" class="nav-link f-awesome active" data-bs-toggle="tab"><i class="fa fa-cog"></i> '
+                . htmlspecialchars($tr('tr_meliscore_dashboard_plugin_common_tab_properties'), ENT_QUOTES) . '</a></li>';
+            $paneHtml = '<div class="tab-pane active" id="plugin_modal_id_tab_0"><div class="row"><div class="col-md-12"><div class="plugin-container"><p class="text-muted" style="padding:8px 4px;">'
+                . htmlspecialchars($tr('tr_meliscore_dashboard_plugin_common_tab_properties'), ENT_QUOTES) . '</p></div></div></div></div>';
+        }
+
+        // Bouton "Appliquer" uniquement si le plugin a de vraies options (comme la modale legacy).
+        $saveBtn = $allEmpty ? '' :
+            '<button id="dashboard-plugin-properties-save" class="btn btn-success float-right"><i class="fa fa-save"></i> '
+            . htmlspecialchars($tr('tr_meliscore_plugins_modal_apply'), ENT_QUOTES) . '</button>';
+
+        $assets   = \MelisReactOverride\Service\PlatformAssetsService::build($sm);
+        $cssLinks = implode("\n", array_map(
+            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars($h, ENT_QUOTES) . '" />',
+            $assets['css'] ?? []
+        ));
+        $headJs = implode("\n", array_map(
+            static fn($h) => '  <script src="' . htmlspecialchars($h, ENT_QUOTES) . '"></script>',
+            $assets['js'] ?? []
+        ));
+        $inlineGlobals = $assets['inline'] ?? '';
+
+        $page = <<<HTML
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="/" />
+  <style>body{margin:0;padding:0;background:#fff}.widget-dnd-modal{box-shadow:none!important}</style>
+  <script>
+  try { Object.defineProperty(window,'parent',{get:function(){return window;},configurable:true}); } catch(e){}
+{$inlineGlobals}
+  </script>
+{$cssLinks}
+{$headJs}
+</head>
+<body>
+  <div class="wizard">
+    <div class="widget widget-tabs widget-tabs-double widget-tabs-responsive margin-none border-none widget-dnd-modal">
+      <div class="widget-head">
+        <span class="widget-melis-tabprev"><i class="fa fa-angle-left"></i></span>
+        <div class="melis-whead-box">
+          <ul class="nav nav-tabs">{$navHtml}</ul>
+        </div>
+        <span class="widget-melis-tabnext"><i class="fa fa-angle-right"></i></span>
+      </div>
+      <div class="widget-body innerAll inner-2x">
+        <div class="tab-content page-evolution-content">{$paneHtml}</div>
+        <br>
+        <div class="clearfix">{$saveBtn}</div>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
 HTML;

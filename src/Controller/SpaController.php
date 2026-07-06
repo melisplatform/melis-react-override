@@ -6,11 +6,11 @@ use Laminas\Mvc\Controller\AbstractActionController;
 
 /**
  * Serves the React SPA shell (index.html) for client-side deep links under
- * /MelisCore/ui-react/*.
+ * /melis-react/*.
  *
  * Real files (the SPA root index.html and the hashed assets) are streamed earlier
  * by MelisAssetManager at bootstrap, so they never reach the MVC router. Only
- * virtual client-side routes (e.g. /MelisCore/ui-react/news/5) fall through here,
+ * virtual client-side routes (e.g. /melis-react/news/5) fall through here,
  * and we return the shell so the browser-side router can take over.
  */
 class SpaController extends AbstractActionController
