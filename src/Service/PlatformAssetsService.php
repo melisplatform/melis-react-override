@@ -49,6 +49,28 @@ class PlatformAssetsService
             $cssFiles = array_values(array_filter((array) ($raw['css'] ?? []), $exists));
         } catch (\Throwable) {}
 
+        // MelisCore's OWN css bundle (Bootstrap + admin layout, i.e. the styling that makes any
+        // legacy tool look like the back-office) is NOT part of getAssets('/'): the real layout
+        // (layoutCore.phtml) loads the meliscore interface separately via
+        // MelisCoreHeadPlugin('/meliscore'), so getAssets deliberately omits it. Two cases:
+        //   • bundle built (dev6/prod): getAssets returns the single '/melis/get-css-bundles' URL,
+        //     whose concatenation ALREADY contains the core css → nothing to add.
+        //   • no concatenated bundle (typical local): getAssets falls back to the per-module
+        //     build/css/bundle.css list, WITHOUT MelisCore → every tool renders as raw unstyled
+        //     HTML. Prepend the core css bundle so the iframe matches the back-office.
+        // Mirrors the JS side, which likewise hard-codes '/MelisCore/build/js/bundle.js' below.
+        $coreCss = '/MelisCore/build/css/bundle.css';
+        $hasConcatBundle = false;
+        foreach ($cssFiles as $c) {
+            if (str_starts_with($c, '/melis/get-css-bundles') || str_starts_with($c, $coreCss)) {
+                $hasConcatBundle = true;
+                break;
+            }
+        }
+        if (!$hasConcatBundle && $exists($coreCss)) {
+            array_unshift($cssFiles, $coreCss);
+        }
+
         // JS load queue:
         //   1. Translations (locale strings)
         //   2. MelisCore bundle.js (jQuery, Bootstrap, DataTables, core tools)
@@ -131,5 +153,59 @@ class PlatformAssetsService
         ]);
 
         return ['css' => $css, 'js' => $js, 'inline' => $inline];
+    }
+
+    /**
+     * Resolve a local asset URL (e.g. "/MelisCms/css/tools/sites/sites.tool.css") to its file on
+     * disk, mirroring MelisAssetManager's URL→module mapping. Returns null for external URLs or
+     * anything not found. The DOCUMENT_ROOT + modules-path map are loaded once per request.
+     */
+    public static function resolvePath(string $url): ?string
+    {
+        static $docRoot = null, $modulesPath = null;
+        if ($docRoot === null) {
+            $docRoot = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/');
+            $modulePathFile = $docRoot . '/../config/melis.modules.path.php';
+            $modulesPath = file_exists($modulePathFile) ? (require $modulePathFile) : [];
+        }
+        if ($url === '' || str_starts_with($url, 'http')) {
+            return null;
+        }
+        if (is_file($docRoot . $url)) {
+            return $docRoot . $url;
+        }
+        $parts = explode('/', ltrim($url, '/'));
+        if (count($parts) > 1 && !empty($modulesPath[$parts[0]])) {
+            $modulePath = $modulesPath[$parts[0]];
+            if (!str_contains($modulePath, $docRoot)) {
+                $modulePath = $docRoot . '/..' . $modulePath;
+            }
+            $cand = $modulePath . '/public/' . implode('/', array_slice($parts, 1));
+            if (is_file($cand)) {
+                return $cand;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Append a mtime cache-buster (?v=…) to a local asset URL so the browser refetches it after an
+     * edit while still caching between edits. Tool CSS/JS are served with a 1-day max-age AND loaded
+     * inside the tool iframe, where a parent hard-refresh doesn't reliably revalidate subresources —
+     * without this, an edited tool stylesheet/script stays stale for up to a day. External URLs,
+     * URLs already carrying a query (e.g. /melis/get-translations?locale=…), and unresolvable paths
+     * are returned unchanged.
+     */
+    public static function bust(string $url): string
+    {
+        if ($url === '' || str_contains($url, '?') || str_starts_with($url, 'http')) {
+            return $url;
+        }
+        $path = self::resolvePath($url);
+        if ($path === null) {
+            return $url;
+        }
+        $mt = @filemtime($path);
+        return $mt ? $url . '?v=' . $mt : $url;
     }
 }
