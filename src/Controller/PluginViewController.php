@@ -30,6 +30,17 @@ use Laminas\View\Model\JsonModel;
 class PluginViewController extends \MelisCore\Controller\PluginViewController
 {
     /**
+     * Dashboard row (MelisCoreDashboardsTable) dedicated to the React dashboard's PER-PLUGIN
+     * CONFIG. Deliberately SEPARATE from the geometry/layout row ('react_dashboard', written by
+     * MelisReactApiController::dashboardLayoutAction): both would otherwise share the same
+     * (d_dashboard_id, d_user_id) d_content XML and clobber each other (the layout save rewrites
+     * the whole blob with geometry-only nodes, wiping config; and vice-versa). Keeping config in
+     * its own row lets each side save independently. Config nodes are keyed by plugin_id = the raw
+     * plugin name (what the config dialog passes), consistent between read and write.
+     */
+    private const REACT_DASHBOARD_CONFIG_ID = 'react_dashboard_config';
+
+    /**
      * Returns a complete, self-contained HTML page for a Melis tool zone.
      *
      * The React app loads this URL directly in an <iframe src="...">.  No
@@ -189,6 +200,24 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
                 $jsRes = array_merge($jsRes, array_values($resJs));
             }
         }
+        // MelisSmallBusiness's workflow validation button is contributed to several tools (pages,
+        // news, blog) — and, crucially, often lives in content loaded LATER inside the iframe: the
+        // news "Old" view loads the LIST tool page (meliscmsnews_left_menu, no button yet) and opens
+        // the edit form via internal AJAX (tabOpen/zoneReload), which never re-runs buildToolPage.
+        // So the workflow button appears without its handler script → DEMAND / Send Request /
+        // Validate-Refuse (all delegated $body handlers in workflow.js) never fire. Inject workflow.js
+        // on EVERY tool page when MelisSmallBusiness is active: as a delegated-handler script it is a
+        // no-op where no button exists, and it catches the button wherever/whenever it is rendered.
+        // FULLY MODULAR: getItem() returns null when SB is inactive → nothing injected.
+        $sbJs = $melisAppConfig->getItem('/melisSB/ressources/js');
+        if (is_array($sbJs)) {
+            foreach ($sbJs as $sbScript) {
+                if (is_string($sbScript) && preg_match('#/workflow\.js$#', $sbScript)) {
+                    $jsRes[] = $sbScript;
+                }
+            }
+        }
+
         $assets['jsRessources'] = array_values(array_unique($jsRes));
 
         // Zone id of the initial tool (used as the first tab-pane id so the classic
@@ -291,7 +320,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize <= 1120) melisCore.screenSize = 1121; } catch(e) {}";
         }
         $cssLinks = implode("\n", array_map(
-            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars($h, ENT_QUOTES) . '" />',
+            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '" />',
             $assets['css'] ?? []
         ));
 
@@ -300,7 +329,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // Platform JS (bundle.js/jQuery + core extras) — in <head> so inline scripts inside the
         // tool HTML have jQuery & the platform globals at parse time.
         $platformJs = implode("\n", array_map(
-            static fn($s) => '  <script src="' . htmlspecialchars($s, ENT_QUOTES) . '"></script>',
+            static fn($s) => '  <script src="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($s), ENT_QUOTES) . '"></script>',
             $assets['js'] ?? []
         ));
 
@@ -308,7 +337,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // load to bind delegated handlers, so <body> (and the tool HTML) must already exist, else
         // the handlers attach to an empty set and the tool's buttons are dead.
         $ressourceJs = implode("\n", array_map(
-            static fn($s) => '  <script src="' . htmlspecialchars($s, ENT_QUOTES) . '"></script>',
+            static fn($s) => '  <script src="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($s), ENT_QUOTES) . '"></script>',
             $assets['jsRessources'] ?? []
         ));
 
@@ -365,31 +394,6 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     };
     ['toolUserManagement','melisCoreTool','melisHelper','melisDataTable'].forEach(_shim);
   })();
-  /* Shared: flatten a Melis error object {field:{label, 0:msg, …}} into a structured
-     [{label, messages:[…]}] list so the React host can render errors PER FIELD (which
-     fields are required) instead of one concatenated blob. */
-  window.__melisErrFields = function(errors){
-    var out = [];
-    try {
-      for (var k in errors){ if (k === 'label') continue; var e = errors[k];
-        var label = (e && typeof e === 'object' && e.label) ? e.label : ((errors && errors.label) || k);
-        var msgs = [];
-        if (e && typeof e === 'object'){ for (var kk in e){ if (kk !== 'label'){ var v = e[kk]; msgs.push((v && typeof v === 'object') ? (v[0] || '') : v); } } }
-        else if (e != null && e !== ''){ msgs.push(e); }
-        if (msgs.length) out.push({ label: label, messages: msgs });
-      }
-    } catch(ex){}
-    return out;
-  };
-  /* The MCP Server (Old) tab reuses the legacy Platform-AI save, so its success notification
-     carries the platform message ("Platform AI configuration saved successfully"). Rewrite it
-     to an MCP-specific message for this tab only — purely cosmetic, in our layer. */
-  window.__melisMapNotif = function(kind, title, message){
-    if ({$melisKeyJs} === 'melisai_mcp_server' && kind === 'ok') {
-      return { title: 'MCP Server', message: 'MCP Server configuration saved successfully' };
-    }
-    return { title: title || '', message: message || '' };
-  };
   /* bundle.js runs the dashboard bubble plugins' \$(document).ready everywhere,
      so inside a tool iframe they fire POST .../dashboard-plugin/<Plugin>/get*
      with a wrong base path → 404 noise. These calls are never legitimate in a
@@ -403,10 +407,12 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     };
     XMLHttpRequest.prototype.send = function(){
       if (this.__melisBlocked) return; // drop legacy dashboard bubble polling
-      // Surface tool action results as toasts: most Melis tool actions answer JSON
-      // {success, textTitle, textMessage}. Forward those to the React host — works even for
-      // tools that reload on success (e.g. Modules) and never call melisOkNotification. The host
-      // de-dupes, so tools that ALSO call melisOkNotification don't double-toast.
+      // No toast forwarding here by design: legacy tools shown in an iframe must look and behave
+      // exactly like direct /melis access, including their own native feedback (gritter toasts,
+      // melisKoNotification's per-field modal, etc) — none of that is bridged to the React host
+      // chrome. We still forward the raw tool-action result (below) purely so the host can react
+      // structurally to a save (e.g. the CMS opening a newly created page + refreshing its tree) —
+      // that postMessage carries no visible notification of its own.
       var xhr = this;
       this.addEventListener('load', function(){
         try {
@@ -415,18 +421,9 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
           var data = JSON.parse(xhr.responseText);
           if (!data || data.success === undefined) return;
           var host = window.__melisRealParent || window.parent;
-          var tr = function(s){ try { return window.melisTranslator ? melisTranslator(s) : ((window.translations && translations[s]) || s); } catch(e){ return s; } };
           // Generic tool-action result: the host can react to a tool's save (e.g. the CMS opens the
           // newly created page + refreshes its tree). Carries the request URL + parsed JSON.
           try { host.postMessage({ __melisToolResult: true, url: (xhr.responseURL || ''), data: data }, '*'); } catch(e) {}
-          var msg = data.textMessage || '';
-          if (!msg) return;
-          var kind = (data.success == 1 || data.success === true) ? 'ok' : 'ko';
-          // Translate title/message so this toast matches the one a tool fires via
-          // melisOkNotification (the host de-dups identical toasts). Without tr(), a tool answering a
-          // tr_ KEY produced TWO toasts: a raw "tr_…" one (here) + a translated one.
-          var _m = window.__melisMapNotif(kind, tr(data.textTitle || ''), tr(msg));
-          host.postMessage({ __melisNotif: true, kind: kind, title: _m.title, message: _m.message, fields: (kind === 'ko' ? window.__melisErrFields(data.errors) : []) }, '*');
         } catch(e) {}
       });
       return _send.apply(this, arguments);
@@ -592,29 +589,28 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
       try { scheduleReport(); } catch(err) {}
     });
   })();
-  /* Notification bridge: tools fire green/red toasts via melisHelper.melisOkNotification /
-     melisKoNotification (gritter) — which would render INSIDE this iframe. Override them to
-     postMessage the (translated) text to the React host, which shows the toast in the BO chrome
-     (top-left), consistent and above the iframes. */
-  (function(){
-    function tr(s){ try { return window.melisTranslator ? melisTranslator(s) : ((window.translations && translations[s]) || s); } catch(e){ return s; } }
-    function send(kind, title, message, fields){
-      var host = window.__melisRealParent || window.parent;
-      var _m = window.__melisMapNotif(kind, tr(title) || '', message || '');
-      try { host.postMessage({ __melisNotif: true, kind: kind, title: _m.title, message: _m.message, fields: fields || [] }, '*'); } catch(e) {}
-    }
-    function install(){
-      if (!window.melisHelper) return false;
-      melisHelper.melisOkNotification = function(title, message){ send('ok', title, tr(message)); };
-      // Keep the base message; forward errors STRUCTURED (per field) so the host renders a
-      // helpful "Field: error" list — same base message as the XHR bridge → host de-dups to one.
-      melisHelper.melisKoNotification = function(title, message, errors){
-        send('ko', title, tr(message) || '', window.__melisErrFields(errors));
-      };
-      return true;
-    }
-    if (!install()) { var n = 0, iv = setInterval(function(){ if (install() || ++n > 50) clearInterval(iv); }, 100); }
-  })();
+  /* Fix legacy data export (CSV/Excel) inside this standalone iframe. melisCoreTool.exportData()
+     does `window.open(url,"_blank")` then `newWindow.onload = () => newWindow.close()`. In the
+     sandboxed iframe that popup opens a blank about:blank tab and the download never lands (the
+     attachment response fires no load event; the popup inherits the sandbox). Replace it with an
+     in-frame anchor click: the URL is same-origin and returns Content-Disposition: attachment, so
+     the browser downloads it directly (needs the iframe `allow-downloads` sandbox flag) with the
+     server-provided filename and no stray tab. Generic — benefits every legacy tool's export. */
+  try {
+    var __melisDownload = function(url){
+      var a = document.createElement('a');
+      a.href = url;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function(){ try { a.remove(); } catch(e) {} }, 1000);
+    };
+    if (window.melisCoreTool) window.melisCoreTool.exportData = function(url){ __melisDownload(url); };
+  } catch(e) {}
+  /* No notification bridge here by design: legacy tools shown in an iframe must look and behave
+     exactly like direct /melis access — melisOkNotification (gritter, renders inside the iframe)
+     and melisKoNotification (native centered per-field modal) are both left completely untouched.
+     Nothing from a legacy tool's own notifications is forwarded to the React host chrome. */
 </script>
 {$callbackBlocks}
 </body>
@@ -680,15 +676,15 @@ HTML;
         }
 
         $cssLinks = implode("\n", array_map(
-            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars($h, ENT_QUOTES) . '" />',
+            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '" />',
             $assets['css'] ?? []
         ));
         $headJs = implode("\n", array_map(
-            static fn($h) => '  <script src="' . htmlspecialchars($h, ENT_QUOTES) . '"></script>',
+            static fn($h) => '  <script src="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '"></script>',
             $assets['js'] ?? []
         ));
         $bodyJs = implode("\n", array_map(
-            static fn($h) => '  <script src="' . htmlspecialchars($h, ENT_QUOTES) . '"></script>',
+            static fn($h) => '  <script src="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '"></script>',
             $jsRes
         ));
         $callbackBlocks = implode("\n", array_map(
@@ -782,8 +778,10 @@ HTML;
      * On réutilise `createOptionsForms()` du plugin (via ControllerPluginManager) pour obtenir
      * les onglets de config, exactement comme renderDashboardPluginModalAction. Beaucoup de
      * plugins n'ont AUCUNE option (onglet `empty`) → on affiche alors un message "aucune option".
-     * Le POST de sauvegarde vers le back React (persistance par-plugin) reste un chantier séparé :
-     * ici on rend le formulaire tel quel (parité visuelle + lecture).
+     * Les valeurs déjà enregistrées sont relues depuis la ligne de dashboard dédiée
+     * `react_dashboard_config` (cf. self::REACT_DASHBOARD_CONFIG_ID / dashboardPluginConfigSaveAction) :
+     * getPluginConfig() → getPluginValueFromDb() charge le nœud <plugin plugin_id="<PluginName>">
+     * de cette ligne dans pluginConfig['datas'], que createOptionsForms() utilise pour préremplir.
      *
      * GET /melis/react-dashboard-plugin-config?plugin=<PluginName>
      */
@@ -801,7 +799,7 @@ HTML;
         $tabs = [];
         try {
             $melisPlugin = $sm->get('ControllerPluginManager')->get($pluginName);
-            $melisPlugin->setUpdatesPluginConfig(['dashboard_id' => 'react_dashboard', 'plugin_id' => $pluginName]);
+            $melisPlugin->setUpdatesPluginConfig(['dashboard_id' => self::REACT_DASHBOARD_CONFIG_ID, 'plugin_id' => $pluginName]);
             $melisPlugin->getPluginConfig();
             $tabs = $melisPlugin->createOptionsForms();
         } catch (\Throwable $e) {
@@ -844,11 +842,11 @@ HTML;
 
         $assets   = \MelisReactOverride\Service\PlatformAssetsService::build($sm);
         $cssLinks = implode("\n", array_map(
-            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars($h, ENT_QUOTES) . '" />',
+            static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '" />',
             $assets['css'] ?? []
         ));
         $headJs = implode("\n", array_map(
-            static fn($h) => '  <script src="' . htmlspecialchars($h, ENT_QUOTES) . '"></script>',
+            static fn($h) => '  <script src="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '"></script>',
             $assets['js'] ?? []
         ));
         $inlineGlobals = $assets['inline'] ?? '';
@@ -895,6 +893,113 @@ HTML;
             ->addHeaderLine('Content-Type',  'text/html; charset=utf-8')
             ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN');
         return $response;
+    }
+
+    /**
+     * Persists a legacy dashboard plugin's config (the Save button of the React config dialog).
+     *
+     * Mirrors the classic flow (gridstack.init.js dashboardPluginModalSubmit →
+     * validateDashboardPluginModal → savePlugins) but scoped to a single plugin and to the
+     * dedicated REACT_DASHBOARD_CONFIG_ID row, so it never touches the React geometry row:
+     *
+     *  1. Instantiate the plugin, load its config from that row (getPluginConfig →
+     *     getPluginValueFromDb, so existing values are the merge base).
+     *  2. Validate the posted form via createOptionsForms() in `validate` mode — same code path as
+     *     DashboardPluginsController::validateDashboardPluginModalAction (returns per-tab success +
+     *     field errors). We flip the request to `?validate` so plugins take that branch.
+     *  3. On success, serialize the plugin's config with its own savePluginConfigToXml($post) and
+     *     REPLACE that plugin's <plugin> node inside the config row's XML, PRESERVING every other
+     *     plugin's node (so saving plugin A never wipes plugin B).
+     *
+     * POST /melis/react-dashboard-plugin-config-save   (form-urlencoded: plugin + form fields)
+     * Response: { success: bool, errors?: array }
+     */
+    public function dashboardPluginConfigSaveAction()
+    {
+        $request = $this->getRequest();
+        if (!$request->isPost()) {
+            return new JsonModel(['success' => false, 'error' => 'Method not allowed']);
+        }
+
+        $post       = $request->getPost()->toArray();
+        $pluginName = (string) ($post['plugin'] ?? $post['pluginName'] ?? $request->getQuery('plugin', ''));
+        if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
+            $this->getResponse()->setStatusCode(400);
+            return new JsonModel(['success' => false, 'error' => 'Invalid plugin']);
+        }
+
+        $sm = $this->getServiceManager();
+
+        // Current user id (config is stored per user, like every dashboard row).
+        $userId = 0;
+        try { $userId = (int) $sm->get('MelisCoreAuth')->getStorage()->read()->usr_id; } catch (\Throwable) {}
+
+        // ── Instantiate the plugin + validate the posted form ────────────────────
+        // createOptionsForms() reads the `validate` flag from the QUERY and the values from the
+        // POST (see MelisCommerce…SalesRevenue::createOptionsForms). Flip the shared request to
+        // validate mode, exactly like the classic ?validate URL.
+        $request->getQuery()->set('validate', 1);
+
+        $errorsTabs = [];
+        try {
+            $melisPlugin = $sm->get('ControllerPluginManager')->get($pluginName);
+            $melisPlugin->setUpdatesPluginConfig(['dashboard_id' => self::REACT_DASHBOARD_CONFIG_ID, 'plugin_id' => $pluginName]);
+            $melisPlugin->getPluginConfig();
+            $errorsTabs = $melisPlugin->createOptionsForms();
+        } catch (\Throwable $e) {
+            return new JsonModel(['success' => false, 'error' => 'Plugin cannot be created']);
+        }
+
+        // A tab is a failure only when it explicitly reports success=false (empty/no-option tabs
+        // carry no 'success' key → treated as OK, matching the legacy validate action).
+        $success = true;
+        if (is_array($errorsTabs)) {
+            foreach ($errorsTabs as $tab) {
+                if (is_array($tab) && array_key_exists('success', $tab) && !$tab['success']) {
+                    $success = false;
+                }
+            }
+        }
+        if (!$success) {
+            return new JsonModel(['success' => false, 'errors' => $errorsTabs]);
+        }
+
+        // ── Persist: replace this plugin's node, keep the others ─────────────────
+        $configFragment = '';
+        try { $configFragment = (string) $melisPlugin->savePluginConfigToXml($post); } catch (\Throwable) {}
+
+        $newNode = '<plugin plugin="' . htmlspecialchars($pluginName, ENT_QUOTES)
+            . '" plugin_id="' . htmlspecialchars($pluginName, ENT_QUOTES) . '">' . "\n"
+            . $configFragment . '</plugin>' . "\n";
+
+        try {
+            $tbl        = $sm->get('MelisCoreDashboardsTable');
+            $existing   = $tbl->getDashboardPlugins(self::REACT_DASHBOARD_CONFIG_ID, $userId)->current();
+            $existingId = $existing ? ($existing->d_id ?? null) : null;
+
+            // Re-serialize every OTHER plugin's node untouched (asXML preserves it verbatim).
+            $otherNodes = '';
+            if ($existing && !empty($existing->d_content)) {
+                $doc = @simplexml_load_string($existing->d_content);
+                if ($doc !== false && isset($doc->plugin)) {
+                    foreach ($doc->plugin as $p) {
+                        if ((string) $p['plugin_id'] !== $pluginName) {
+                            $otherNodes .= $p->asXML() . "\n";
+                        }
+                    }
+                }
+            }
+
+            $xml = '<?xml version="1.0" encoding="UTF-8"?>' . "\n<Plugins>\n" . $otherNodes . $newNode . '</Plugins>';
+            $tbl->save(
+                ['d_dashboard_id' => self::REACT_DASHBOARD_CONFIG_ID, 'd_user_id' => $userId, 'd_content' => $xml],
+                $existingId
+            );
+        } catch (\Throwable $e) {
+            return new JsonModel(['success' => false, 'error' => $e->getMessage()]);
+        }
+
+        return new JsonModel(['success' => true]);
     }
 
     public function generateAction()
