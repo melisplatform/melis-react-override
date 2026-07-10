@@ -308,15 +308,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     #melis-id-body-content-load > .tab-pane[data-meliskey="meliscore_tool_other_config"] { padding: 12px 24px 24px; }';
         }
 
-        // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) only activates when
-        // melisCore.screenSize (= the iframe window width, set ONCE at load) is > 1120. That legacy
-        // threshold assumed the full-width classic BO; in the React BO the iframe is narrower (the
-        // page-tree sidebar takes ~256px), so on browser windows < ~1376px the iframe drops under
-        // 1120 and the toolbar never sticks — it just scrolls off-screen. Nudge screenSize past the
-        // gate so the EXISTING legacy sticky logic runs (no competing handler). Positioning still
-        // uses the real $body.width(), and the iframe is always a desktop tool view → safe to force.
+        // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) and the Commerce
+        // category-edit sticky header (category.tool.js) both gate their sticky/scroll behavior on
+        // melisCore.screenSize (= the iframe window width, set ONCE at load) being above a legacy
+        // threshold — 1120 for CMS, 768 for category.tool.js. Those thresholds assumed the full-width
+        // classic BO; in the React BO the iframe is narrower (page-tree/list sidebar takes space), so
+        // it can drop under either threshold and the sticky behavior silently disables itself.
+        // Nudge screenSize past both gates so the EXISTING legacy sticky logic runs (no competing
+        // handler). Positioning still uses the real $body.width(), and the iframe is always a
+        // desktop tool view → safe to force.
         $extraScript = '';
-        if ($melisKey === 'meliscms_page') {
+        if ($melisKey === 'meliscms_page' || $melisKey === 'meliscommerce_categories_page') {
             $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize <= 1120) melisCore.screenSize = 1121; } catch(e) {}";
         }
         $cssLinks = implode("\n", array_map(
@@ -455,7 +457,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        top:47px — calibrated for the classic BO's 47px fixed top header, which does NOT exist inside
        this standalone iframe (the React shell header is outside the iframe). So the bar floated 47px
        below the top. Pin it to the iframe top. Scoped to .sticky-pageactions → no effect on other tools. */
-    .sticky-pageactions { top: 0 !important; }{$extraStyle}
+    .sticky-pageactions { top: 0 !important; }
+    /* Same fixed-header offset problem as .sticky-pageactions above, for the Commerce
+       category/catalogue edit header (category.tool.js's .fix-cat, commerce-style.css:2071-2076):
+       its "top: 38px" is calibrated for the classic BO's fixed top bar, which doesn't exist in this
+       standalone iframe — leaving a 38px gap above the pinned header once it goes fixed on scroll.
+       Beyond that offset, the header's own internal top padding/margin (bundle.css's base
+       .card-header{padding-top:.5rem} + commerce-style.css:2286-2287's
+       .panel-heading-buttons{margin:10px 22px 0}) reads as classic BO's normal header spacing when
+       it sits under the real 47px navbar — but as a floating gap once that navbar doesn't exist here. */
+    #id_meliscommerce_categories_category.fix-cat .card-header,
+    #id_meliscommerce_categories_category.fix-cat .panel-heading { top: 0 !important; padding-top: 0 !important; }
+    #id_meliscommerce_categories_category.fix-cat .panel-heading-buttons { margin-top: 0 !important; }{$extraStyle}
   </style>
 </head>
 <body>
@@ -495,11 +508,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      The classic BO layout provides it; our standalone tool page must too, or modal-based edits
      (e.g. editing a slide in MelisCmsSlider) silently fail (appended to an empty selector). -->
 <div id="melis-modals-container"></div>
+<script>
+  /* Screen-size nudge (see the "Per-tool exception" comment further up this method) MUST run
+     before the module resource scripts below: some of them (e.g. category.tool.js) wrap their ENTIRE scroll-listener
+     binding inside a one-time `melisCore.screenSize >= N` gate evaluated at parse time — nudging
+     screenSize any later than this leaves the listener permanently unbound for the page load. */{$extraScript}
+</script>
 {$ressourceJs}
 <script>
   /* Initialise the active tab id so classic tool handlers (scroll, edit, categories…)
      that read the global activeTabId don't throw before any tab is opened. */
-  try { window.activeTabId = {$zoneIdJs}; } catch(e) {}{$extraScript}
+  try { window.activeTabId = {$zoneIdJs}; } catch(e) {}
   /* Activate the first inner tab + its pane of each tab group, exactly like the classic zone
      loader does after a zoneReload (melisHelper.js:725-726). Tools/pages render their .nav-tabs
      with NO active tab in the markup (render-pagetab.phtml) and rely on this JS — without it the
