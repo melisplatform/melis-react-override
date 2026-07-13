@@ -156,6 +156,43 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         };
         $collectTypeRoots($appsConfig);
 
+        // A module can also declare its tool tree INLINE inside meliscore's toolstree, with no
+        // `type` link at all (e.g. MelisCron: /meliscore/interface/…/meliscron_conf/meliscron_tool).
+        // The plugin root then stays 'meliscore' — which we skip below as "already bundled" — and
+        // the type walk finds nothing, so the module's own ressources never reach the iframe. For
+        // MelisCron that meant tool.js was missing, and since every action there is a delegated
+        // $('body') handler (.btnAddCron / .btnEditCron / .btnDeleteCron / .btnRerunCron /
+        // .btnViewCronHistory), NOTHING was bound → clicking any button in the tool did nothing.
+        // Derive the owning module from the `forward` nodes of the interface subtree instead, and
+        // map each module name back to its app-config root. The lookup is case-insensitive because
+        // roots are spelled inconsistently across modules ('meliscron', 'melisTipimail',
+        // 'MelisCmsSlider'). Injecting a module's ressources is always a subset of what the classic
+        // back-office layout does (it loads EVERY active module's ressources), and identical URLs
+        // are de-duplicated below, so this cannot double-bind a handler. Modules that already use a
+        // `type` link (MelisCalendar → melistoolcalendar) are covered above and simply gain nothing
+        // new here.
+        $configRoots = $melisAppConfig->getItem('/');
+        $rootsByLowerName = [];
+        foreach (array_keys(is_array($configRoots) ? $configRoots : []) as $configRoot) {
+            $rootsByLowerName[strtolower($configRoot)] = $configRoot;
+        }
+        $collectForwardRoots = function ($node) use (&$collectForwardRoots, &$roots, $rootsByLowerName) {
+            if (!is_array($node)) {
+                return;
+            }
+            foreach ($node as $k => $v) {
+                if ($k === 'forward' && is_array($v) && !empty($v['module']) && is_string($v['module'])) {
+                    $root = $rootsByLowerName[strtolower($v['module'])] ?? null;
+                    if ($root !== null) {
+                        $roots[$root] = true;
+                    }
+                } elseif (is_array($v)) {
+                    $collectForwardRoots($v);
+                }
+            }
+        };
+        $collectForwardRoots($appsConfig);
+
         // MelisSmallBusiness contributes action buttons to the CMS page editor (page-lock
         // unlock, versioning, comments, workflow) through `forward` links — which the `type`
         // walk above cannot reach. Their click handlers live in the melisSB ressources
