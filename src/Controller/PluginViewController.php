@@ -366,6 +366,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     ' . $mk . ' .widget + .widget, ' . $mk . ' [class*="col-"] > .widget { margin-bottom: 16px; }
     ' . $mk . ' .row > [class*="col-"] { margin-bottom: 8px; }';
         }
+        if ($melisKey === 'meliscommerce_categories_page') {
+            // Catalogues/Catégories edit form: sticky header pinned 38px down (commerce-style.css:
+            // 2071-2076, calibrated for classic BO's real fixed top chrome, absent in this standalone
+            // iframe) plus its own baked-in top padding/margin (invisible in classic BO, under the
+            // real navbar there) — both read as a floating gap above the header once actually stuck.
+            // Scoped to .fix-cat (the stuck/scrolled state only) so classic /melis is untouched.
+            $extraStyle = '
+    #id_meliscommerce_categories_category.fix-cat .card-header,
+    #id_meliscommerce_categories_category.fix-cat .panel-heading { top: 0 !important; padding-top: 0 !important; }
+    #id_meliscommerce_categories_category.fix-cat .panel-heading-buttons { margin-top: 0 !important; }';
+        }
 
         // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) only activates when
         // melisCore.screenSize (= the iframe window width, set ONCE at load) is > 1120. That legacy
@@ -374,9 +385,15 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // 1120 and the toolbar never sticks — it just scrolls off-screen. Nudge screenSize past the
         // gate so the EXISTING legacy sticky logic runs (no competing handler). Positioning still
         // uses the real $body.width(), and the iframe is always a desktop tool view → safe to force.
+        // Commerce's Catalogues/Catégories tool (category.tool.js) has the SAME gate but at 768px,
+        // and — unlike CMS's, which re-checks live on every scroll — it's evaluated ONCE at
+        // script-parse time, so the nudge below must land before {$ressourceJs} (category.tool.js
+        // itself), not after.
         $extraScript = '';
         if ($melisKey === 'meliscms_page') {
             $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize <= 1120) melisCore.screenSize = 1121; } catch(e) {}";
+        } elseif ($melisKey === 'meliscommerce_categories_page') {
+            $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize < 768) melisCore.screenSize = 768; } catch(e) {}";
         }
         $cssLinks = implode("\n", array_map(
             static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '" />',
@@ -491,7 +508,14 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 {$inlineGlobals}
   </script>
   <style>
-    html, body { margin: 0; padding: 0; background: transparent; }
+    /* The tool page IS the scroll container of the iframe. The classic BO css keeps
+       html/body at height:100% (they scroll an inner layout in the real back-office). Here the
+       tool HTML is a plain document flow: with a 100%-tall body, a tool taller than the iframe
+       (e.g. the GDPR anonymization form with its TinyMCE editors) overflows a body that cannot
+       grow. Chrome papers over it by propagating the body's overflow to the viewport, but Firefox
+       keeps the fixed-height body as the scroll box → the bottom of the form is unreachable.
+       Let the document grow and scroll instead — same result in every engine. */
+    html, body { margin: 0; padding: 0; background: transparent; height: auto !important; min-height: 100%; overflow: visible !important; }
     #content { margin-left: 0 !important; padding-left: 0 !important; width: 100% !important; }
     /* Tab framework (classic back-office) — pane switching driven by tabOpen/tabSwitch.
        The initial tool pane is .active; opening an edit tab toggles .active so only one
@@ -554,11 +578,13 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      The classic BO layout provides it; our standalone tool page must too, or modal-based edits
      (e.g. editing a slide in MelisCmsSlider) silently fail (appended to an empty selector). -->
 <div id="melis-modals-container"></div>
+<script>{$extraScript}
+</script>
 {$ressourceJs}
 <script>
   /* Initialise the active tab id so classic tool handlers (scroll, edit, categories…)
      that read the global activeTabId don't throw before any tab is opened. */
-  try { window.activeTabId = {$zoneIdJs}; } catch(e) {}{$extraScript}
+  try { window.activeTabId = {$zoneIdJs}; } catch(e) {}
   /* Activate the first inner tab + its pane of each tab group, exactly like the classic zone
      loader does after a zoneReload (melisHelper.js:725-726). Tools/pages render their .nav-tabs
      with NO active tab in the markup (render-pagetab.phtml) and rely on this JS — without it the
@@ -666,6 +692,36 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     };
     if (window.melisCoreTool) window.melisCoreTool.exportData = function(url){ __melisDownload(url); };
   } catch(e) {}
+  /* Self-heal legacy Bootstrap modals opened from INSIDE this standalone iframe. The CMS page-tree
+     "site selector" (behind the GDPR "Validation page" field, opened by sites.tool.js via
+     melisHelper.createModal) — like several legacy modals — rebinds its own hide.bs.modal handler
+     that REMOVES the modal element and hand-manages the backdrop. On the iframe path this can leave
+     a stray (often near-invisible white) .modal-backdrop still covering the viewport plus the body
+     stuck in the modal-open scroll-lock: the scrollbar vanishes and the form below can no longer be
+     scrolled, with NO modal actually visible. Watch for that settled state and clear it. Guarded by
+     "no modal is really shown", so a legitimately-open modal is never touched. */
+  (function(){
+    function modalShown(){
+      var m = document.querySelectorAll('.modal'), i, el;
+      for (i = 0; i < m.length; i++) { el = m[i];
+        if (el.classList.contains('show') || el.style.display === 'block') return true; }
+      return false;
+    }
+    function heal(){
+      if (modalShown()) return;
+      var backs = document.querySelectorAll('.modal-backdrop'), i;
+      for (i = 0; i < backs.length; i++) { try { backs[i].remove(); } catch(e) {} }
+      var b = document.body; if (!b) return;
+      b.classList.remove('modal-open');
+      b.style.removeProperty('overflow');
+      b.style.removeProperty('padding-right');
+    }
+    var t; function schedule(){ try { clearTimeout(t); } catch(e) {} t = setTimeout(heal, 400); }
+    try { new MutationObserver(schedule).observe(document.body, { childList: true, attributes: true, attributeFilter: ['class','style'] }); } catch(e) {}
+    /* Safety net for a state that has already settled (no further mutation to observe): any click
+       re-checks and un-freezes if a stray backdrop/scroll-lock is still around and no modal is up. */
+    document.addEventListener('click', schedule, true);
+  })();
   /* No notification bridge here by design: legacy tools shown in an iframe must look and behave
      exactly like direct /melis access — melisOkNotification (gritter, renders inside the iframe)
      and melisKoNotification (native centered per-field modal) are both left completely untouched.
