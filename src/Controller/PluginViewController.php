@@ -389,6 +389,16 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     #id_meliscommerce_categories_category.fix-cat .panel-heading { top: 0 !important; padding-top: 0 !important; }
     #id_meliscommerce_categories_category.fix-cat .panel-heading-buttons { margin-top: 0 !important; }';
         }
+        if ($melisKey === 'melisagent_tool') {
+            // AI-agent scenario-step editor modal: melis-ai style.css forces
+            // `#id_melisai_scenario_step_modal_container .modal-content { width: 150% }` to widen it
+            // in the full-width classic BO. Inside this narrower tool iframe that 150% shoots past
+            // the right edge (the dialog can no longer be centered/contained). Neutralise the 150%
+            // and cap the dialog to the iframe viewport — the modal stays wide but fits and centers.
+            $extraStyle = '
+    #id_melisai_scenario_step_modal_container .modal-dialog { width: 100%; max-width: min(800px, calc(100vw - 2rem)); margin-left: auto; margin-right: auto; }
+    #id_melisai_scenario_step_modal_container .modal-content { width: 100% !important; }';
+        }
 
         // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) only activates when
         // melisCore.screenSize (= the iframe window width, set ONCE at load) is > 1120. That legacy
@@ -550,7 +560,16 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        top:47px — calibrated for the classic BO's 47px fixed top header, which does NOT exist inside
        this standalone iframe (the React shell header is outside the iframe). So the bar floated 47px
        below the top. Pin it to the iframe top. Scoped to .sticky-pageactions → no effect on other tools. */
-    .sticky-pageactions { top: 0 !important; }{$extraStyle}
+    .sticky-pageactions { top: 0 !important; }
+    /* Legacy Bootstrap modals were authored for the full-height classic back-office page; inside
+       this fixed-height tool iframe a modal taller than the visible area overflows it — its body
+       and the footer Save/Close buttons land off-screen and (depending on the loaded Bootstrap
+       version, whose `.modal-open .modal{overflow-y:auto}` rule may not apply here) can't even be
+       scrolled to. Cap every tool modal to the iframe viewport and scroll its body instead, so
+       tall modals (e.g. the AI-agent scenario-step editor) stay fully usable. Short modals keep
+       their natural height (max-height only caps). */
+    .modal { overflow-x: hidden !important; overflow-y: auto !important; }
+    .modal .modal-body { max-height: calc(100vh - 6rem); overflow-y: auto; }{$extraStyle}
   </style>
 </head>
 <body>
