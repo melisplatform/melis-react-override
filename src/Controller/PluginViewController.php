@@ -205,18 +205,6 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             $roots['melisSB'] = true;
         }
 
-        // The Orders list's own appsConfig tree (fetched above) only covers the list zone
-        // itself — an order's detail view (Invoice tab: regenerate/export buttons, forward
-        // module MelisCommerceOrderInvoice) is loaded LATER via an internal tabOpen/zoneReload
-        // AJAX call once the admin opens a specific order, so the `forward`-module walk above
-        // never sees it. Without meliscommerceorderinvoice.js, its delegated $('body') handlers
-        // (.regenerate-invoice / .export-invoice-pdf / .export-order-pdf) are never bound →
-        // clicking any of those buttons does nothing. Same fix shape as the melisSB case above:
-        // FULLY MODULAR, getItem() below returns null (no phantom load) if the module is absent.
-        if ($key === 'meliscommerce_order_list_page') {
-            $roots['meliscommerceorderinvoice'] = true;
-        }
-
         // Module-owned asset adjustments (e.g. MelisAI forcing its module JS into the <head>
         // bucket for inline scripts that need the globals at parse time). $skipJsRoots lets an
         // extension mark a plugin root as "already injected" so the generic end-of-body loop
@@ -399,6 +387,20 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     #id_melisai_scenario_step_modal_container .modal-dialog { width: 100%; max-width: min(800px, calc(100vw - 2rem)); margin-left: auto; margin-right: auto; }
     #id_melisai_scenario_step_modal_container .modal-content { width: 100% !important; }';
         }
+        if ($melisKey === 'melis_core_gdpr') {
+            // GDPR "Banners" language switcher (English / Français): the legacy markup reuses
+            // melis-commerce's .product-text-tab classes, but that styling isn't injected into this
+            // standalone iframe and is scoped to .content-cont (absent here), so the pills render
+            // unstyled and the platform theme's secondary color leaks onto the inactive tab. Restore
+            // the intended pill look — iframe-scoped, the legacy .phtml / .css are untouched.
+            $g = '.mcms-gdpr-banner-details .product-text-tab li.mcms-gdpr-banner-lang a';
+            $extraStyle = "
+    {$g} { padding: 0 !important; background: #ECEBEB !important; border-radius: 4px !important; color: #7D7B7B; display: flex !important; align-items: center; justify-content: space-between; margin: 0 0 10px; text-shadow: none; box-shadow: none; border: none !important; min-height: 36px; overflow: hidden; }
+    {$g}.active, {$g}:hover, {$g}:focus { color: #fff; background: #e61c23 !important; font-weight: normal; text-decoration: none; }
+    {$g}.active span, {$g}:hover span, {$g}:focus span { color: #fff; }
+    {$g} span { display: inline-block; padding: 6px 7px 6px 15px; vertical-align: middle; color: #7D7B7B; }
+    {$g} .imgDisplay { float: none !important; margin-right: 12px; max-width: 24px !important; max-height: 18px !important; width: auto; height: auto; }";
+        }
 
         // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) only activates when
         // melisCore.screenSize (= the iframe window width, set ONCE at load) is > 1120. That legacy
@@ -416,6 +418,25 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize <= 1120) melisCore.screenSize = 1121; } catch(e) {}";
         } elseif ($melisKey === 'meliscommerce_categories_page') {
             $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize < 768) melisCore.screenSize = 768; } catch(e) {}";
+        } elseif ($melisKey === 'melis_core_gdpr') {
+            // The GDPR "Banners" tab content (banner-details.phtml, melis-cms) is AJAX-loaded when the
+            // tab is clicked — AFTER the one-shot "activate first inner tab" pass below (line ~614)
+            // already ran, so it never reaches the language switcher. That legacy view ships no
+            // default-active class (the classic BO relies on a global script we don't run here), so
+            // until a language is clicked no pane shows. Watch for the switcher appearing and activate
+            // the first language if none is active. Scoped to this melisKey; the legacy .phtml is untouched.
+            $extraScript = "\n  (function(){\n"
+                . "    function ensure(){\n"
+                . "      var box = document.querySelector('.mcms-gdpr-banner-details'); if (!box) return;\n"
+                . "      var tabs = box.querySelectorAll('.product-text-tab .mcms-gdpr-banner-language'); if (!tabs.length) return;\n"
+                . "      if (box.querySelector('.mcms-gdpr-banner-language.active')) return;\n"
+                . "      var first = tabs[0]; first.classList.add('active');\n"
+                . "      var sel = first.getAttribute('data-bs-target') || first.getAttribute('href') || '';\n"
+                . "      if (sel.charAt(0) === '#') { var pane = document.getElementById(sel.slice(1)); if (pane) pane.classList.add('show','active'); }\n"
+                . "    }\n"
+                . "    try { new MutationObserver(ensure).observe(document.documentElement, { childList:true, subtree:true }); } catch(e) {}\n"
+                . "    ensure();\n"
+                . "  })();";
         }
         $cssLinks = implode("\n", array_map(
             static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '" />',
