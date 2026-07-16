@@ -156,6 +156,43 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         };
         $collectTypeRoots($appsConfig);
 
+        // A module can also declare its tool tree INLINE inside meliscore's toolstree, with no
+        // `type` link at all (e.g. MelisCron: /meliscore/interface/…/meliscron_conf/meliscron_tool).
+        // The plugin root then stays 'meliscore' — which we skip below as "already bundled" — and
+        // the type walk finds nothing, so the module's own ressources never reach the iframe. For
+        // MelisCron that meant tool.js was missing, and since every action there is a delegated
+        // $('body') handler (.btnAddCron / .btnEditCron / .btnDeleteCron / .btnRerunCron /
+        // .btnViewCronHistory), NOTHING was bound → clicking any button in the tool did nothing.
+        // Derive the owning module from the `forward` nodes of the interface subtree instead, and
+        // map each module name back to its app-config root. The lookup is case-insensitive because
+        // roots are spelled inconsistently across modules ('meliscron', 'melisTipimail',
+        // 'MelisCmsSlider'). Injecting a module's ressources is always a subset of what the classic
+        // back-office layout does (it loads EVERY active module's ressources), and identical URLs
+        // are de-duplicated below, so this cannot double-bind a handler. Modules that already use a
+        // `type` link (MelisCalendar → melistoolcalendar) are covered above and simply gain nothing
+        // new here.
+        $configRoots = $melisAppConfig->getItem('/');
+        $rootsByLowerName = [];
+        foreach (array_keys(is_array($configRoots) ? $configRoots : []) as $configRoot) {
+            $rootsByLowerName[strtolower($configRoot)] = $configRoot;
+        }
+        $collectForwardRoots = function ($node) use (&$collectForwardRoots, &$roots, $rootsByLowerName) {
+            if (!is_array($node)) {
+                return;
+            }
+            foreach ($node as $k => $v) {
+                if ($k === 'forward' && is_array($v) && !empty($v['module']) && is_string($v['module'])) {
+                    $root = $rootsByLowerName[strtolower($v['module'])] ?? null;
+                    if ($root !== null) {
+                        $roots[$root] = true;
+                    }
+                } elseif (is_array($v)) {
+                    $collectForwardRoots($v);
+                }
+            }
+        };
+        $collectForwardRoots($appsConfig);
+
         // MelisSmallBusiness contributes action buttons to the CMS page editor (page-lock
         // unlock, versioning, comments, workflow) through `forward` links — which the `type`
         // walk above cannot reach. Their click handlers live in the melisSB ressources
@@ -166,6 +203,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // below returns null → no resource is injected (no phantom load).
         if ($key === 'meliscms_page') {
             $roots['melisSB'] = true;
+        }
+
+        // The Orders list's own appsConfig tree (fetched above) only covers the list zone
+        // itself — an order's detail view (Invoice tab: regenerate/export buttons, forward
+        // module MelisCommerceOrderInvoice) is loaded LATER via an internal tabOpen/zoneReload
+        // AJAX call once the admin opens a specific order, so the `forward`-module walk above
+        // never sees it. Without meliscommerceorderinvoice.js, its delegated $('body') handlers
+        // (.regenerate-invoice / .export-invoice-pdf / .export-order-pdf) are never bound →
+        // clicking any of those buttons does nothing. Same fix shape as the melisSB case above:
+        // FULLY MODULAR, getItem() below returns null (no phantom load) if the module is absent.
+        if ($key === 'meliscommerce_order_list_page') {
+            $roots['meliscommerceorderinvoice'] = true;
         }
 
         // Module-owned asset adjustments (e.g. MelisAI forcing its module JS into the <head>
@@ -307,19 +356,56 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     /* "Autres Configurations" — content sits flush to the edges; inset it. */
     #melis-id-body-content-load > .tab-pane[data-meliskey="meliscore_tool_other_config"] { padding: 12px 24px 24px; }';
         }
+        if ($melisKey === 'meliscore_user_profile') {
+            // "My account" — the profile/messenger widget renders flush to the iframe edges and its
+            // columns/cards are cramped. Inset the whole tool and add breathing room around the
+            // profile card, the Profil/Messenger tabs, the form rows and the messenger panels.
+            $mk = '[data-meliskey="meliscore_user_profile"]';
+            $extraStyle = '
+    /* "My account" — inset + tidy spacing (iframe-scoped, /melis untouched). */
+    #melis-id-body-content-load > .tab-pane' . $mk . ' { padding: 20px 28px 32px; }
+    ' . $mk . ' .widget-user { border: 1px solid #e4e7ea; border-radius: 6px; overflow: hidden; }
+    ' . $mk . ' .widget-user .row-merge { margin: 0; }
+    /* gutter + separator between the profile card (left) and the tabs/content (right) */
+    ' . $mk . ' #id_meliscore_user_profile_left { padding: 24px 20px; }
+    ' . $mk . ' #id_meliscore_user_profile_right { padding: 0; border-left: 1px solid #e4e7ea; }
+    /* Profil / Messenger tab strip: give it padding and a bottom border */
+    ' . $mk . ' #id_meliscore_user_profile_tabs > .nav-tabs { padding: 8px 16px 0; margin-bottom: 0; }
+    ' . $mk . ' #id_meliscore_user_profile_tabs .tab-content { padding: 24px 28px; }
+    /* form rows: consistent vertical rhythm */
+    ' . $mk . ' .tab-content .form-group { margin-bottom: 18px; }
+    /* messenger: space the Contacts / Chat panels and let them breathe */
+    ' . $mk . ' .widget + .widget, ' . $mk . ' [class*="col-"] > .widget { margin-bottom: 16px; }
+    ' . $mk . ' .row > [class*="col-"] { margin-bottom: 8px; }';
+        }
+        if ($melisKey === 'meliscommerce_categories_page') {
+            // Catalogues/Catégories edit form: sticky header pinned 38px down (commerce-style.css:
+            // 2071-2076, calibrated for classic BO's real fixed top chrome, absent in this standalone
+            // iframe) plus its own baked-in top padding/margin (invisible in classic BO, under the
+            // real navbar there) — both read as a floating gap above the header once actually stuck.
+            // Scoped to .fix-cat (the stuck/scrolled state only) so classic /melis is untouched.
+            $extraStyle = '
+    #id_meliscommerce_categories_category.fix-cat .card-header,
+    #id_meliscommerce_categories_category.fix-cat .panel-heading { top: 0 !important; padding-top: 0 !important; }
+    #id_meliscommerce_categories_category.fix-cat .panel-heading-buttons { margin-top: 0 !important; }';
+        }
 
-        // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) and the Commerce
-        // category-edit sticky header (category.tool.js) both gate their sticky/scroll behavior on
-        // melisCore.screenSize (= the iframe window width, set ONCE at load) being above a legacy
-        // threshold — 1120 for CMS, 768 for category.tool.js. Those thresholds assumed the full-width
-        // classic BO; in the React BO the iframe is narrower (page-tree/list sidebar takes space), so
-        // it can drop under either threshold and the sticky behavior silently disables itself.
-        // Nudge screenSize past both gates so the EXISTING legacy sticky logic runs (no competing
-        // handler). Positioning still uses the real $body.width(), and the iframe is always a
-        // desktop tool view → safe to force.
+        // Per-tool exception: the CMS page-actions sticky toolbar (melisCms.js) only activates when
+        // melisCore.screenSize (= the iframe window width, set ONCE at load) is > 1120. That legacy
+        // threshold assumed the full-width classic BO; in the React BO the iframe is narrower (the
+        // page-tree sidebar takes ~256px), so on browser windows < ~1376px the iframe drops under
+        // 1120 and the toolbar never sticks — it just scrolls off-screen. Nudge screenSize past the
+        // gate so the EXISTING legacy sticky logic runs (no competing handler). Positioning still
+        // uses the real $body.width(), and the iframe is always a desktop tool view → safe to force.
+        // Commerce's Catalogues/Catégories tool (category.tool.js) has the SAME gate but at 768px,
+        // and — unlike CMS's, which re-checks live on every scroll — it's evaluated ONCE at
+        // script-parse time, so the nudge below must land before {$ressourceJs} (category.tool.js
+        // itself), not after.
         $extraScript = '';
-        if ($melisKey === 'meliscms_page' || $melisKey === 'meliscommerce_categories_page') {
+        if ($melisKey === 'meliscms_page') {
             $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize <= 1120) melisCore.screenSize = 1121; } catch(e) {}";
+        } elseif ($melisKey === 'meliscommerce_categories_page') {
+            $extraScript = "\n  try { if (window.melisCore && melisCore.screenSize < 768) melisCore.screenSize = 768; } catch(e) {}";
         }
         $cssLinks = implode("\n", array_map(
             static fn($h) => '  <link rel="stylesheet" href="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '" />',
@@ -434,7 +520,14 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 {$inlineGlobals}
   </script>
   <style>
-    html, body { margin: 0; padding: 0; background: transparent; }
+    /* The tool page IS the scroll container of the iframe. The classic BO css keeps
+       html/body at height:100% (they scroll an inner layout in the real back-office). Here the
+       tool HTML is a plain document flow: with a 100%-tall body, a tool taller than the iframe
+       (e.g. the GDPR anonymization form with its TinyMCE editors) overflows a body that cannot
+       grow. Chrome papers over it by propagating the body's overflow to the viewport, but Firefox
+       keeps the fixed-height body as the scroll box → the bottom of the form is unreachable.
+       Let the document grow and scroll instead — same result in every engine. */
+    html, body { margin: 0; padding: 0; background: transparent; height: auto !important; min-height: 100%; overflow: visible !important; }
     #content { margin-left: 0 !important; padding-left: 0 !important; width: 100% !important; }
     /* Tab framework (classic back-office) — pane switching driven by tabOpen/tabSwitch.
        The initial tool pane is .active; opening an edit tab toggles .active so only one
@@ -457,18 +550,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        top:47px — calibrated for the classic BO's 47px fixed top header, which does NOT exist inside
        this standalone iframe (the React shell header is outside the iframe). So the bar floated 47px
        below the top. Pin it to the iframe top. Scoped to .sticky-pageactions → no effect on other tools. */
-    .sticky-pageactions { top: 0 !important; }
-    /* Same fixed-header offset problem as .sticky-pageactions above, for the Commerce
-       category/catalogue edit header (category.tool.js's .fix-cat, commerce-style.css:2071-2076):
-       its "top: 38px" is calibrated for the classic BO's fixed top bar, which doesn't exist in this
-       standalone iframe — leaving a 38px gap above the pinned header once it goes fixed on scroll.
-       Beyond that offset, the header's own internal top padding/margin (bundle.css's base
-       .card-header{padding-top:.5rem} + commerce-style.css:2286-2287's
-       .panel-heading-buttons{margin:10px 22px 0}) reads as classic BO's normal header spacing when
-       it sits under the real 47px navbar — but as a floating gap once that navbar doesn't exist here. */
-    #id_meliscommerce_categories_category.fix-cat .card-header,
-    #id_meliscommerce_categories_category.fix-cat .panel-heading { top: 0 !important; padding-top: 0 !important; }
-    #id_meliscommerce_categories_category.fix-cat .panel-heading-buttons { margin-top: 0 !important; }{$extraStyle}
+    .sticky-pageactions { top: 0 !important; }{$extraStyle}
   </style>
 </head>
 <body>
@@ -508,11 +590,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      The classic BO layout provides it; our standalone tool page must too, or modal-based edits
      (e.g. editing a slide in MelisCmsSlider) silently fail (appended to an empty selector). -->
 <div id="melis-modals-container"></div>
-<script>
-  /* Screen-size nudge (see the "Per-tool exception" comment further up this method) MUST run
-     before the module resource scripts below: some of them (e.g. category.tool.js) wrap their ENTIRE scroll-listener
-     binding inside a one-time `melisCore.screenSize >= N` gate evaluated at parse time — nudging
-     screenSize any later than this leaves the listener permanently unbound for the page load. */{$extraScript}
+<script>{$extraScript}
 </script>
 {$ressourceJs}
 <script>
@@ -626,6 +704,36 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     };
     if (window.melisCoreTool) window.melisCoreTool.exportData = function(url){ __melisDownload(url); };
   } catch(e) {}
+  /* Self-heal legacy Bootstrap modals opened from INSIDE this standalone iframe. The CMS page-tree
+     "site selector" (behind the GDPR "Validation page" field, opened by sites.tool.js via
+     melisHelper.createModal) — like several legacy modals — rebinds its own hide.bs.modal handler
+     that REMOVES the modal element and hand-manages the backdrop. On the iframe path this can leave
+     a stray (often near-invisible white) .modal-backdrop still covering the viewport plus the body
+     stuck in the modal-open scroll-lock: the scrollbar vanishes and the form below can no longer be
+     scrolled, with NO modal actually visible. Watch for that settled state and clear it. Guarded by
+     "no modal is really shown", so a legitimately-open modal is never touched. */
+  (function(){
+    function modalShown(){
+      var m = document.querySelectorAll('.modal'), i, el;
+      for (i = 0; i < m.length; i++) { el = m[i];
+        if (el.classList.contains('show') || el.style.display === 'block') return true; }
+      return false;
+    }
+    function heal(){
+      if (modalShown()) return;
+      var backs = document.querySelectorAll('.modal-backdrop'), i;
+      for (i = 0; i < backs.length; i++) { try { backs[i].remove(); } catch(e) {} }
+      var b = document.body; if (!b) return;
+      b.classList.remove('modal-open');
+      b.style.removeProperty('overflow');
+      b.style.removeProperty('padding-right');
+    }
+    var t; function schedule(){ try { clearTimeout(t); } catch(e) {} t = setTimeout(heal, 400); }
+    try { new MutationObserver(schedule).observe(document.body, { childList: true, attributes: true, attributeFilter: ['class','style'] }); } catch(e) {}
+    /* Safety net for a state that has already settled (no further mutation to observe): any click
+       re-checks and un-freezes if a stray backdrop/scroll-lock is still around and no modal is up. */
+    document.addEventListener('click', schedule, true);
+  })();
   /* No notification bridge here by design: legacy tools shown in an iframe must look and behave
      exactly like direct /melis access — melisOkNotification (gritter, renders inside the iframe)
      and melisKoNotification (native centered per-field modal) are both left completely untouched.
@@ -635,6 +743,129 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 </body>
 </html>
 HTML;
+    }
+
+    /**
+     * Rend un plugin dashboard : HTML + jsCallbacks + scripts propres.
+     *
+     * Partagé par le mode iframe (dashboardPluginPageAction) et le mode AJAX
+     * (dashboardPluginContentAction) — les deux ont besoin exactement des mêmes trois choses.
+     *
+     * @return array{html: string, callbacks: string[], js: string[], css: string[]}|null
+     */
+    private function renderDashboardPlugin(string $pluginName): ?array
+    {
+        $sm             = $this->getServiceManager();
+        $melisAppConfig = $sm->get('MelisCoreConfig');
+        $melisKeys      = $melisAppConfig->getMelisKeys();
+        $appConfigPath  = $melisKeys[$pluginName] ?? null;
+
+        if (!$appConfigPath) {
+            return null;
+        }
+
+        $parts   = explode('/', $appConfigPath);
+        $keyView = $parts[count($parts) - 1];
+
+        $appsConfig = $melisAppConfig->getItem($appConfigPath);
+        [$jsCallBacks] = $melisAppConfig->getJsCallbacksDatas($appsConfig);
+
+        // Legacy adds the plugin's own `datas.jscallback` on top of the forward's callbacks
+        // (DashboardPluginsController::renderDashboardPluginAction) — it's what boots the plugin's
+        // JS (charts, etc.). Without it the widget renders but stays inert.
+        if (!empty($appsConfig['datas']['jscallback'])) {
+            $jsCallBacks[] = $appsConfig['datas']['jscallback'];
+        }
+
+        $this->getRequest()->getHeaders()->addHeaderLine('X-Requested-With', 'XMLHttpRequest');
+
+        // Render through the plugin's own render() — the same path legacy uses. Rendering the zone
+        // directly (generateRec) skips MelisCoreDashboardTemplatingPlugin::getPluginConfig(), so the
+        // `pluginConfig` view variable stays null and templates reading $this->pluginConfig['datas']
+        // [...] warn ("Trying to access array offset on null") and lose their settings. Passing the
+        // React config row makes the per-plugin settings saved from the React dashboard apply too.
+        $html = null;
+        try {
+            $melisPlugin = $sm->get('ControllerPluginManager')->get($pluginName);
+            $pluginModel = $melisPlugin->render([
+                'dashboard_id' => self::REACT_DASHBOARD_CONFIG_ID,
+                'plugin_id'    => $pluginName,
+            ]);
+
+            // On garde le conteneur legacy ENTIER (plugin-container.phtml). Tentant de ne prendre que
+            // `pluginView` (React dessine déjà son cadre), mais plusieurs plugins vont chercher leur
+            // config dans le DOM du conteneur — MelisCommerceDashboardPluginOrdersNumber et le plugin
+            // Prospects font `.closest('.grid-stack-item').find('… .dashboard-plugin-json-config')`
+            // puis `JSON.parse()` : sans ce nœud → JSON.parse("") → "Unexpected end of JSON input" →
+            // graphique jamais initialisé. On garde donc la structure et on masque en CSS l'en-tête
+            // legacy (.widget-head : titre + engrenage + poubelle), redondant avec le cadre React.
+            $html = $sm->get('ViewRenderer')->render($pluginModel);
+        } catch (\Throwable $e) {
+            $html = null;
+        }
+
+        // Fallback: plugins that aren't registered as controller plugins (or that blow up in
+        // render()) still render as a plain zone, as before.
+        if ($html === null) {
+            $zoneView = $this->generateRec($keyView, $appConfigPath, $jsCallBacks, []);
+            $zoneView->setVariable('zoneconfig', $appsConfig);
+            $zoneView->setVariable('parameters', []);
+            $zoneView->setVariable('keyInterface', $keyView);
+
+            if (!empty($zoneView->getVariable('jsCallBacks')) && is_array($zoneView->getVariable('jsCallBacks'))) {
+                $jsCallBacks = \Laminas\Stdlib\ArrayUtils::merge($zoneView->getVariable('jsCallBacks'), $jsCallBacks);
+                $jsCallBacks = array_unique($jsCallBacks);
+            }
+
+            $html = $this->renderViewRec($zoneView);
+        }
+
+        $jsCallBacks = array_values(array_unique($jsCallBacks));
+
+        // Resources for this plugin. `ressources` is a MODULE-level key: Melis merges the blocks of
+        // every config file of the module, so asking MelisCoreConfig for "/meliscommerce/ressources/js"
+        // returns all ~44 MelisCommerce tool scripts (jstree, lightbox, product.tool.js…) — for ONE
+        // widget, in ONE iframe, and there is one iframe per widget.
+        //
+        // When a plugin declares its own JS (`<module>/config/dashboard-plugins/<Plugin>.config.php`,
+        // see pluginOwnResources), that file is self-contained — it defines the plugin's jscallback —
+        // so load only it. When it declares none, the plugin RELIES on module-level scripts (e.g.
+        // MelisCalendarEventsPlugin's `initDashboardCalendar()` lives in a meliscalendar module file),
+        // so keep the module-wide list: pruning it there would break the widget.
+        //
+        // CSS stays module-wide either way: stylesheets load in parallel (no sequential cost) and
+        // dropping them risks unstyled widgets for no real gain.
+        $pluginKey = explode('/', ltrim($appConfigPath, '/'))[0] ?? '';
+        $jsRes  = [];
+        $cssRes = [];
+        if ($pluginKey !== '' && strtolower($pluginKey) !== 'meliscore') {
+            $own = $this->pluginOwnResources($pluginName);
+
+            if ($own !== null && $own['js'] !== []) {
+                $jsRes = $own['js'];
+            } else {
+                // Module-wide fallback. NB: a module may declare its scripts under a config key that
+                // differs from the plugin's own path segment (MelisCalendar registers the plugin under
+                // `meliscalendar` but its scripts — including the plugin's `initDashboardCalendar()`
+                // callback — under `melistoolcalendar`), so asking for "/$pluginKey/ressources/js"
+                // alone silently yields nothing and the widget renders inert. Union both.
+                $resJs = $melisAppConfig->getItem("/$pluginKey/ressources/js");
+                $jsRes = is_array($resJs) ? array_values($resJs) : [];
+                $jsRes = array_values(array_unique(array_merge($jsRes, $this->moduleWideJs($pluginName))));
+            }
+
+            $resCss = $melisAppConfig->getItem("/$pluginKey/ressources/css");
+            if (is_array($resCss)) {
+                $cssRes = array_values($resCss);
+            }
+        }
+
+        return [
+            'html'      => $html,
+            'callbacks' => $jsCallBacks,
+            'js'        => $jsRes,
+            'css'       => $cssRes,
+        ];
     }
 
     /**
@@ -651,47 +882,21 @@ HTML;
             return $this->getResponse();
         }
 
-        $sm             = $this->getServiceManager();
-        $melisAppConfig = $sm->get('MelisCoreConfig');
-        $melisKeys      = $melisAppConfig->getMelisKeys();
-        $appConfigPath  = $melisKeys[$pluginName] ?? null;
+        $sm     = $this->getServiceManager();
+        $render = $this->renderDashboardPlugin($pluginName);
 
-        if (!$appConfigPath) {
+        if ($render === null) {
             $this->getResponse()->setStatusCode(404);
             return $this->getResponse();
         }
 
-        $parts   = explode('/', $appConfigPath);
-        $keyView = $parts[count($parts) - 1];
+        $html        = $render['html'];
+        $jsCallBacks = $render['callbacks'];
+        $jsRes       = $render['js'];
 
-        $appsConfig = $melisAppConfig->getItem($appConfigPath);
-        [$jsCallBacks] = $melisAppConfig->getJsCallbacksDatas($appsConfig);
-
-        $this->getRequest()->getHeaders()->addHeaderLine('X-Requested-With', 'XMLHttpRequest');
-
-        $zoneView = $this->generateRec($keyView, $appConfigPath, $jsCallBacks, []);
-        $zoneView->setVariable('zoneconfig', $appsConfig);
-        $zoneView->setVariable('parameters', []);
-        $zoneView->setVariable('keyInterface', $keyView);
-
-        if (!empty($zoneView->getVariable('jsCallBacks')) && is_array($zoneView->getVariable('jsCallBacks'))) {
-            $jsCallBacks = \Laminas\Stdlib\ArrayUtils::merge($zoneView->getVariable('jsCallBacks'), $jsCallBacks);
-            $jsCallBacks = array_unique($jsCallBacks);
-        }
-
-        $html   = $this->renderViewRec($zoneView);
         $assets = \MelisReactOverride\Service\PlatformAssetsService::build($sm);
-
-        // Collect module-specific resources (same logic as toolPageAction).
-        $pluginKey = explode('/', ltrim($appConfigPath, '/'))[0] ?? '';
-        $jsRes = [];
-        if ($pluginKey !== '' && strtolower($pluginKey) !== 'meliscore') {
-            $resJs  = $melisAppConfig->getItem("/$pluginKey/ressources/js");
-            $resCss = $melisAppConfig->getItem("/$pluginKey/ressources/css");
-            if (is_array($resJs))  { $jsRes = array_values($resJs); }
-            if (is_array($resCss)) {
-                $assets['css'] = array_values(array_unique(array_merge($assets['css'], array_values($resCss))));
-            }
+        if ($render['css'] !== []) {
+            $assets['css'] = array_values(array_unique(array_merge($assets['css'], $render['css'])));
         }
 
         $cssLinks = implode("\n", array_map(
@@ -713,6 +918,16 @@ HTML;
 
         $inlineGlobals = $assets['inline'] ?? '';
 
+        // Conteneur du plugin + global `activeTabId`. Les plugins dashboard supposent la page du BO
+        // legacy, où le contenu vit dans l'onglet actif et où ils le RETROUVENT via ce global — ex.
+        // MelisCommerceDashboardPluginSalesRevenue plotte dans `$("#"+activeTabId).find(selector)`.
+        // Sans lui : $("#undefined") → sélection VIDE → flot reçoit un conteneur sans dimensions →
+        // "createLinearGradient: non-finite value" → aucun graphique. On recrée donc le strict
+        // minimum : un wrapper portant cet id + le melisKey du dashboard (les handlers de filtre
+        // testent `[data-melisKey="meliscore_dashboard"]`).
+        $zoneId   = 'melis_react_dashboard_plugin';
+        $zoneIdJs = json_encode($zoneId, JSON_UNESCAPED_SLASHES);
+
         $page = <<<HTML
 <!DOCTYPE html>
 <html>
@@ -724,7 +939,16 @@ HTML;
        (ex. moxiemanager skin CSS, ou "melis/dashboard-plugin/…") se résout contre cette URL →
        "/melis/melis/dashboard-plugin/…" (404) ou une CSS renvoyant du HTML. <base href="/"> corrige. -->
   <base href="/" />
-  <style>body { margin: 0; overflow: auto; } .widget-header-content, .widget-header-actions { display: none !important; }</style>
+  <style>body { margin: 0; overflow: auto; } .widget-header-content, .widget-header-actions { display: none !important; }
+    #melis-id-nav-bar-tabs { display: none !important; }
+    /* Le conteneur legacy du plugin est conservé (des plugins lisent leur config dans son DOM), mais
+       il est prévu pour vivre DANS une grille gridstack : .grid-stack-item est positionné en absolu
+       et l'en-tête .widget-head duplique le cadre React. On remet le tout en flux normal et on masque
+       le chrome legacy — seul le contenu du plugin reste visible. */
+    .grid-stack-item { position: static !important; width: auto !important; height: auto !important; left: auto !important; top: auto !important; }
+    .grid-stack-item-content { position: static !important; overflow: visible !important; }
+    .widget-head { display: none !important; }
+    .widget, .widget-inverse { margin: 0 !important; border: 0 !important; background: transparent !important; box-shadow: none !important; }</style>
   <script>
   /* Neutralise bundle.js "Remove Envato Frame" guard — same shim as toolPageAction. */
   try { window.__melisRealParent = window.parent; } catch(e) {}
@@ -732,14 +956,24 @@ HTML;
     Object.defineProperty(window, 'parent', { get: function(){ return window; }, configurable: true });
     Object.defineProperty(window, 'top',    { get: function(){ return window; }, configurable: true });
   } catch(e) {}
-  /* bundle.js lance les plugins de bulles (News/Notifications/Chat) partout → dans cette iframe
-     ils POSTent .../dashboard-plugin/<Plugin>/get* avec une mauvaise base → 404. Le dashboard React
-     a sa PROPRE API de bulles ; ces appels ne sont jamais légitimes ici → on les avale au niveau XHR. */
+  /* Défini AVANT les scripts du plugin (certains le lisent au chargement). melisCore.js le RECALCULE
+     ensuite au ready depuis la barre d'onglets (voir le <ul> caché plus bas) — d'où les deux. */
+  try { window.activeTabId = {$zoneIdJs}; } catch(e) {}
+  /* bundle.js lance les plugins de BULLES (News/Notifications/Updates/Chat) partout → dans cette
+     iframe ils POSTent .../dashboard-plugin/<BubblePlugin>/get* avec une mauvaise base → 404. Le
+     dashboard React a sa PROPRE API de bulles ; ces appels ne sont jamais légitimes ici.
+
+     ⚠️ Ne bloquer QUE les bulles, pas tout "/dashboard-plugin/" : c'est aussi l'URL par laquelle les
+     widgets vont chercher LEURS données (ex. MelisCommerceDashboardPluginSalesRevenue POSTe vers
+     /melis/dashboard-plugin/MelisCommerceDashboardPluginSalesRevenue/getDashboardSalesRevenueData).
+     Un filtre large avalait ces requêtes → les graphiques flot ne recevaient jamais de données et
+     restaient vides, d'où l'impression que "flotchart n'est pas chargé". */
   (function(){
+    var BUBBLE_RE = /\/dashboard-plugin\/[^/]*Bubble[^/]*\//i;
     var _open = XMLHttpRequest.prototype.open;
     var _send = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url){
-      this.__melisBlocked = (typeof url === 'string' && url.indexOf('/dashboard-plugin/') !== -1);
+      this.__melisBlocked = (typeof url === 'string' && BUBBLE_RE.test(url));
       return _open.apply(this, arguments);
     };
     XMLHttpRequest.prototype.send = function(){
@@ -771,10 +1005,27 @@ HTML;
 {$inlineGlobals}
   </script>
 {$cssLinks}
-{$headJs}
 </head>
 <body>
+<!-- Barre d'onglets factice (cachée). melisCore.js, à son init, ÉCRASE le global activeTabId avec
+     `\$navTabs.find("li.active").children("a").data("id")` (melisCore.js:939) : sans ce strip il
+     repasse à `undefined` juste après notre affectation, et les plugins qui ciblent leur conteneur
+     via $("#"+activeTabId) plottent alors dans une sélection VIDE (→ flot sans dimensions →
+     "createLinearGradient: non-finite"). Le `li` DOIT porter la classe `active` (c'est `li.active`
+     qui est cherché, pas le `<a>`). -->
+<ul class="nav nav-tabs navbar-nav tabsbar" id="melis-id-nav-bar-tabs" role="tablist">
+  <li class="nav-item active" data-tool-id="{$zoneId}" data-tool-meliskey="meliscore_dashboard" role="presentation">
+    <a data-bs-toggle="tab" class="nav-link tab-element active" href="#{$zoneId}" data-id="{$zoneId}">dashboard</a>
+  </li>
+</ul>
+<!-- Le JS plateforme est chargé ICI — dans <body>, APRÈS le strip d'onglets — et NON dans <head>,
+     pour la même raison que toolPageAction : melisCore.js est une IIFE qui CACHE ses sélecteurs au
+     chargement (`var \$navTabs = \$("#melis-id-nav-bar-tabs")`). Chargé depuis <head>, ce cache est
+     VIDE (pas encore de <body>) → activeTabId retombe à undefined quoi qu'on fasse. -->
+{$headJs}
+<div id="{$zoneId}" data-melisKey="meliscore_dashboard">
 {$html}
+</div>
 {$bodyJs}
 {$callbackBlocks}
 </body>
@@ -787,6 +1038,294 @@ HTML;
             ->addHeaderLine('Content-Type',  'text/html; charset=utf-8')
             ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN');
         return $response;
+    }
+
+    // ─── Rendu AJAX (widgets du dashboard React SANS iframe) ─────────────────
+
+    /**
+     * Curated JS the AJAX widgets need — deliberately NOT `bundle.js`.
+     *
+     * bundle.js is the whole back-office application: melisCore.js (session polling, flash
+     * messenger, tab framework, `activeTabId` recomputed from a tab bar that doesn't exist here),
+     * gridstack.init.js, the bubble plugins, TinyMCE… Loading it into the React shell would run all
+     * of that against React's DOM. The widgets only actually need jQuery, flot and moment, so we
+     * load those files directly from their sources (the same ones webpack.mix.js concatenates).
+     */
+    private const AJAX_WIDGET_JS = [
+        '/MelisCore/assets/components/library/jquery/jquery.min.js',
+        '/MelisCore/assets/components/library/moment/moment.js',
+        '/MelisCore/js/moment/fr.js',
+        '/MelisCore/assets/components/modules/admin/charts/flot/assets/lib/excanvas.js',
+        '/MelisCore/assets/components/modules/admin/charts/flot/assets/lib/jquery.flot.js',
+        '/MelisCore/assets/components/modules/admin/charts/flot/assets/lib/jquery.flot.resize.js',
+        '/MelisCore/assets/components/modules/admin/charts/flot/assets/lib/jquery.flot.time.js',
+        '/MelisCore/assets/components/modules/admin/charts/flot/assets/lib/plugins/jquery.flot.tooltip.min.js',
+        '/MelisCore/assets/components/modules/admin/charts/flot/assets/lib/jquery.flot.stack.js',
+        // Définit le global `charts`, sur lequel les plugins branchent leurs graphiques.
+        '/MelisCore/assets/components/modules/admin/charts/flot/assets/custom/js/flotcharts.common.js',
+    ];
+
+    /**
+     * Scripts de module à NE JAMAIS charger dans le DOCUMENT DU SHELL React.
+     *
+     * Les widgets AJAX sont injectés dans le document du shell (pas dans une iframe) : les scripts
+     * de leur module s'exécutent donc sur le DOM de React. La plupart se contentent de brancher des
+     * handlers délégués (inertes s'il n'y a pas de bouton) — mais la « media library » de
+     * MelisSmallBusiness, elle, MODIFIE la page au DOM-ready : media_upload_field.js fait
+     * `$body.append(<div class="modal">…<iframe src="moxiemanager/index.php">)`. Dans une page
+     * d'outil legacy (buildToolPage) c'est invisible — le CSS Bootstrap met `.modal` en
+     * `display:none`. Dans le shell React, le CSS legacy est scopé à `.melis-legacy-widget` : la
+     * modale s'affiche donc EN CLAIR sous la page, son iframe charge MoxieManager (requêtes
+     * api.php, 500 sur icomoon.woff), et son `onload="loadModalIframe()"` lit un `$body` qui n'est
+     * défini que dans la closure du fichier → « ReferenceError: $body is not defined ».
+     *
+     * Aucun widget dashboard n'utilise la media library → on retire cette famille de scripts de la
+     * liste module-wide envoyée au shell. Les pages d'outils (iframe) ne sont pas concernées.
+     */
+    private const SHELL_UNSAFE_JS = [
+        '#/media_upload_field\.js$#',
+        '#/medialib\.js$#',
+        '#/moxiemanager/#',
+    ];
+
+    /** Retire les scripts dangereux pour le document du shell (cf. SHELL_UNSAFE_JS). */
+    private static function stripShellUnsafeJs(array $js): array
+    {
+        return array_values(array_filter($js, static function (string $url): bool {
+            foreach (self::SHELL_UNSAFE_JS as $pattern) {
+                if (preg_match($pattern, parse_url($url, PHP_URL_PATH) ?: $url)) {
+                    return false;
+                }
+            }
+            return true;
+        }));
+    }
+
+    /**
+     * Contenu d'un widget dashboard pour une injection AJAX dans le DOM React (sans iframe).
+     *
+     * Renvoie le HTML du plugin + de quoi le faire vivre : ses scripts et ses jsCallbacks. Le HTML
+     * est celui du chemin legacy (cf. dashboardPluginPageAction) — conteneur compris, car des
+     * plugins y lisent leur config.
+     *
+     * GET /melis/react-dashboard-plugin-content?plugin=<PluginName>
+     * → { success, html, callbacks: string[], js: string[], css: string, coreJs: string[] }
+     */
+    public function dashboardPluginContentAction()
+    {
+        $pluginName = $this->getRequest()->getQuery('plugin', '');
+        if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
+            $this->getResponse()->setStatusCode(400);
+            return new JsonModel(['success' => false, 'error' => 'Invalid plugin']);
+        }
+
+        $render = $this->renderDashboardPlugin($pluginName);
+        if ($render === null) {
+            $this->getResponse()->setStatusCode(404);
+            return new JsonModel(['success' => false, 'error' => 'Unknown plugin']);
+        }
+
+        $bust = static fn(string $u): string => \MelisReactOverride\Service\PlatformAssetsService::bust($u);
+
+        // Les traductions viennent EN PREMIER : elles définissent les globals `translations` et
+        // `melisLangId`, que les plugins lisent pour leurs libellés et formats de date (ex. les
+        // séries du graphique Commerce sont nommées via translations.tr_melis_commerce_…).
+        $session = new SessionContainer('meliscore');
+        $locale  = $session['melis-lang-locale'] ?? 'en_EN';
+        $coreJs  = array_merge(
+            ['/melis/get-translations?locale=' . urlencode($locale)],
+            self::AJAX_WIDGET_JS
+        );
+
+        // Globals que le layout du BO legacy déclare (primaryColor, themerPrimaryColor, basePath…).
+        // flotcharts.common.js les lit AU CHARGEMENT pour construire le global `charts` : sans eux il
+        // lève "themerPrimaryColor is not defined", `charts` n'existe jamais, et le plugin échoue sur
+        // `charts.xxx = {…}` (« Cannot set properties of undefined »). Donc aucun graphique.
+        $assets = \MelisReactOverride\Service\PlatformAssetsService::build($this->getServiceManager());
+
+        return new JsonModel([
+            'success'   => true,
+            'html'      => self::stripLegacyWidgetHead($render['html']),
+            'callbacks' => $render['callbacks'],
+            'globals'   => $assets['inline'] ?? '',
+            'coreJs'    => array_map($bust, $coreJs),
+            'js'        => array_map($bust, self::stripShellUnsafeJs($render['js'])),
+            'css'       => '/melis/react-legacy-widget-css',
+        ]);
+    }
+
+    /**
+     * Retire l'EN-TÊTE du conteneur legacy (plugin-container.phtml `.widget-head` : titre + engrenage
+     * + poubelle + refresh) du HTML d'un widget.
+     *
+     * En AJAX, le widget est injecté DANS le cadre React, qui affiche déjà son propre titre et ses
+     * propres boutons : garder l'en-tête legacy dupliquerait tout ça (et ses boutons, qui pilotent
+     * gridstack, ne sont branchés sur rien ici).
+     *
+     * On ne retire QUE l'en-tête, pas le conteneur : les nœuds `.grid-stack-item` /
+     * `.dashboard-plugin-json-config` restent nécessaires — plusieurs plugins y lisent leur config
+     * (`.closest('.grid-stack-item').find('… .dashboard-plugin-json-config')`).
+     */
+    private static function stripLegacyWidgetHead(string $html): string
+    {
+        if ($html === '' || !str_contains($html, 'widget-head')) {
+            return $html;
+        }
+
+        $doc = new \DOMDocument();
+        // Le HTML est un FRAGMENT : sans ces flags, DOMDocument lui ajoute <html><body>. Le préfixe
+        // XML force l'UTF-8 (sinon les accents des libellés Melis sortent en mojibake).
+        $prev = libxml_use_internal_errors(true);
+        $ok = $doc->loadHTML(
+            '<?xml encoding="UTF-8">' . $html,
+            LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
+        );
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+
+        if (!$ok) {
+            return $html; // HTML non parsable → on préfère l'en-tête en trop à un widget vide.
+        }
+
+        $xpath = new \DOMXPath($doc);
+        $heads = $xpath->query("//*[contains(concat(' ', normalize-space(@class), ' '), ' widget-head ')]");
+        if ($heads !== false) {
+            foreach ($heads as $head) {
+                $head->parentNode?->removeChild($head);
+            }
+        }
+
+        $out = '';
+        foreach ($doc->childNodes as $child) {
+            $out .= $doc->saveHTML($child);
+        }
+
+        return $out !== '' ? $out : $html;
+    }
+
+    /**
+     * Feuille de style legacy SCOPÉE (cf. LegacyWidgetCssService) pour les widgets AJAX.
+     *
+     * Servie telle quelle au shell React : toutes ses règles sont préfixées par
+     * `.melis-legacy-widget`, donc elle ne peut pas repeindre le back-office React.
+     *
+     * GET /melis/react-legacy-widget-css
+     */
+    public function legacyWidgetCssAction()
+    {
+        $assets = \MelisReactOverride\Service\PlatformAssetsService::build($this->getServiceManager());
+        $built  = \MelisReactOverride\Service\LegacyWidgetCssService::build($assets['css'] ?? []);
+
+        $response = $this->getResponse();
+        $response->setContent($built['css']);
+        $response->getHeaders()
+            ->addHeaderLine('Content-Type', 'text/css; charset=utf-8')
+            // Le contenu est déterministe et versionné par le mtime des sources → cache long + ETag.
+            ->addHeaderLine('Cache-Control', 'public, max-age=86400')
+            ->addHeaderLine('ETag', '"' . $built['version'] . '"');
+
+        return $response;
+    }
+
+    /**
+     * JS/CSS declared by ONE dashboard plugin, as opposed to its whole module.
+     *
+     * Melis merges every config file of a module into a single module-level `ressources` node, so
+     * the config service cannot tell us which files belong to which plugin. The source files can:
+     * a dashboard plugin always ships as `<module>/config/dashboard-plugins/<PluginName>.config.php`
+     * (the convention every module's Module.php includes by that exact path), and that file carries
+     * only its own `ressources`. We locate the module directory from the plugin's controller-plugin
+     * class and read that one file.
+     *
+     * @return array{js: string[], css: string[]}|null  null when the file can't be resolved
+     *                                                   (caller then falls back to module-wide).
+     */
+    private function pluginOwnResources(string $pluginName): ?array
+    {
+        $dir = $this->pluginModuleDir($pluginName);
+        if ($dir === null) {
+            return null;
+        }
+
+        $configFile = $dir . '/config/dashboard-plugins/' . $pluginName . '.config.php';
+        if (!is_file($configFile)) {
+            return null;
+        }
+
+        return self::collectResources(include $configFile);
+    }
+
+    /**
+     * All JS declared by the plugin's MODULE, across every config key of its app.interface.php.
+     *
+     * Needed because a module's scripts are not always filed under the same config key as its
+     * plugins (MelisCalendar: plugin under `meliscalendar`, scripts under `melistoolcalendar`), so
+     * the plugin's own path segment is not a reliable place to look them up.
+     *
+     * @return string[]
+     */
+    private function moduleWideJs(string $pluginName): array
+    {
+        $dir = $this->pluginModuleDir($pluginName);
+        if ($dir === null || !is_file($dir . '/config/app.interface.php')) {
+            return [];
+        }
+
+        return self::collectResources(include $dir . '/config/app.interface.php')['js'];
+    }
+
+    /** Root directory of the module owning a dashboard plugin, via its controller-plugin class. */
+    private function pluginModuleDir(string $pluginName): ?string
+    {
+        // Dashboard plugins register as controller_plugins, not controllers.
+        $cp    = $this->getServiceManager()->get('config')['controller_plugins'] ?? [];
+        $class = ($cp['factories'] ?? [])[$pluginName]
+            ?? ($cp['invokables'] ?? [])[$pluginName]
+            ?? ($cp['aliases'] ?? [])[$pluginName]
+            ?? null;
+
+        if (!is_string($class) || !class_exists($class)) {
+            return null;
+        }
+
+        try {
+            $classFile = (new \ReflectionClass($class))->getFileName();
+        } catch (\Throwable) {
+            return null;
+        }
+
+        // …/<module>/src/Controller/DashboardPlugins/<Plugin>.php → …/<module>
+        $srcPos = $classFile ? strrpos($classFile, DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR) : false;
+
+        return $srcPos === false ? null : substr($classFile, 0, $srcPos);
+    }
+
+    /**
+     * Flattens the `ressources` js/css of every module key of a Melis config array.
+     *
+     * @return array{js: string[], css: string[]}
+     */
+    private static function collectResources(mixed $cfg): array
+    {
+        $out = ['js' => [], 'css' => []];
+        if (!is_array($cfg) || !is_array($cfg['plugins'] ?? null)) {
+            return $out;
+        }
+
+        foreach ($cfg['plugins'] as $moduleCfg) {
+            foreach (['js', 'css'] as $type) {
+                foreach ((array) ($moduleCfg['ressources'][$type] ?? []) as $file) {
+                    if (is_string($file) && $file !== '') {
+                        $out[$type][] = $file;
+                    }
+                }
+            }
+        }
+
+        $out['js']  = array_values(array_unique($out['js']));
+        $out['css'] = array_values(array_unique($out['css']));
+
+        return $out;
     }
 
     /**
@@ -855,9 +1394,20 @@ HTML;
         }
 
         // Bouton "Appliquer" uniquement si le plugin a de vraies options (comme la modale legacy).
+        //
+        // ⚠️ L'id est VOLONTAIREMENT différent du legacy (`dashboard-plugin-properties-save`) :
+        // gridstack.init.js (chargé via bundle.js) pose un handler délégué sur <body> pour cet id,
+        // qui appelle dashboardPluginModalSubmit(). Celui-ci lit ses données dans
+        // `#id_meliscore_dashboard_plugin_modal_container` et `.modal-content form` — deux éléments
+        // qui n'existent PAS dans cette page → il POSTait des données VIDES vers
+        // /melis/MelisCore/DashboardPlugins/validateDashboardPluginModal?validate. Avec un id distinct,
+        // le handler legacy ne matche plus et seul notre submit (ci-dessous) tourne.
         $saveBtn = $allEmpty ? '' :
-            '<button id="dashboard-plugin-properties-save" class="btn btn-success float-right"><i class="fa fa-save"></i> '
+            '<button id="react-dashboard-plugin-config-save" class="btn btn-success float-right"><i class="fa fa-save"></i> '
             . htmlspecialchars($tr('tr_meliscore_plugins_modal_apply'), ENT_QUOTES) . '</button>';
+
+        $pluginJs = json_encode($pluginName, JSON_UNESCAPED_SLASHES);
+        $errTitle = json_encode($tr('tr_meliscore_error_message'), JSON_UNESCAPED_UNICODE);
 
         $assets   = \MelisReactOverride\Service\PlatformAssetsService::build($sm);
         $cssLinks = implode("\n", array_map(
@@ -879,6 +1429,9 @@ HTML;
   <base href="/" />
   <style>body{margin:0;padding:0;background:#fff}.widget-dnd-modal{box-shadow:none!important}</style>
   <script>
+  /* Le vrai parent (le shell React) DOIT être capturé avant que `window.parent` ne soit masqué
+     ci-dessous — sinon plus aucun moyen de prévenir l'hôte que la config a été enregistrée. */
+  var __melisHostWindow = window.parent;
   try { Object.defineProperty(window,'parent',{get:function(){return window;},configurable:true}); } catch(e){}
 {$inlineGlobals}
   </script>
@@ -902,6 +1455,63 @@ HTML;
       </div>
     </div>
   </div>
+<script>
+(function(){
+  var PLUGIN = {$pluginJs};
+  var btn = document.getElementById('react-dashboard-plugin-config-save');
+  if (!btn) return;
+
+  btn.addEventListener('click', function(e){
+    e.preventDefault();
+
+    /* Sérialise TOUS les champs des onglets. Les cases décochées ne sont pas envoyées par un form
+       classique : le legacy (dashboardPluginModalSubmit) les pousse explicitement à 0 pour qu'un
+       décochage soit persisté — même chose ici, sinon on ne peut jamais DÉSACTIVER une option. */
+    var data = new FormData();
+    data.append('plugin', PLUGIN);
+
+    var fields = document.querySelectorAll('.tab-content input, .tab-content select, .tab-content textarea');
+    Array.prototype.forEach.call(fields, function(f){
+      if (!f.name || f.disabled) return;
+      if (f.type === 'checkbox' || f.type === 'radio') {
+        if (f.checked) data.append(f.name, f.value);
+        else if (f.type === 'checkbox') data.append(f.name, '0');
+      } else if (f.multiple && f.selectedOptions) {
+        Array.prototype.forEach.call(f.selectedOptions, function(o){ data.append(f.name, o.value); });
+      } else {
+        data.append(f.name, f.value);
+      }
+    });
+
+    btn.disabled = true;
+    fetch('/melis/react-dashboard-plugin-config-save', {
+      method: 'POST',
+      body: data,
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    })
+      .then(function(r){ return r.json(); })
+      .then(function(res){
+        btn.disabled = false;
+        if (res && res.success) {
+          /* Prévient l'hôte React : il ferme la modale et recharge l'iframe du widget pour que la
+             nouvelle config s'applique (le rendu lit la config au chargement). */
+          try { __melisHostWindow.postMessage({ type: 'melis-plugin-config-saved', plugin: PLUGIN }, '*'); } catch(err) {}
+        } else {
+          var errs = (res && res.errors) || {};
+          var msgs = [];
+          Object.keys(errs).forEach(function(k){
+            var e2 = errs[k];
+            if (typeof e2 === 'string') msgs.push(e2);
+            else if (e2 && typeof e2 === 'object') Object.keys(e2).forEach(function(k2){ msgs.push(e2[k2]); });
+          });
+          alert(msgs.length ? msgs.join('\\n') : {$errTitle});
+        }
+      })
+      .catch(function(){ btn.disabled = false; alert({$errTitle}); });
+  });
+})();
+</script>
 </body>
 </html>
 HTML;

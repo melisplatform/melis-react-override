@@ -41,6 +41,43 @@ return [
                             ],
                         ],
                     ],
+                    // POST endpoint that validates + persists a legacy dashboard plugin's config
+                    // (the Save button of the React config dialog). Isolated storage row so it
+                    // never collides with the React layout/geometry save.
+                    'react-dashboard-plugin-config-save' => [
+                        'type'    => 'Segment',
+                        'options' => [
+                            'route'    => 'react-dashboard-plugin-config-save',
+                            'defaults' => [
+                                'controller' => 'MelisCore\Controller\PluginView',
+                                'action'     => 'dashboardPluginConfigSave',
+                            ],
+                        ],
+                    ],
+                    // JSON: HTML + scripts + jsCallbacks of a legacy dashboard plugin, for the React
+                    // dashboard to inject it straight into its DOM (AJAX widgets — no iframe).
+                    'react-dashboard-plugin-content' => [
+                        'type'    => 'Segment',
+                        'options' => [
+                            'route'    => 'react-dashboard-plugin-content',
+                            'defaults' => [
+                                'controller' => 'MelisCore\Controller\PluginView',
+                                'action'     => 'dashboardPluginContent',
+                            ],
+                        ],
+                    ],
+                    // The legacy back-office stylesheets, every rule scoped under
+                    // `.melis-legacy-widget` so they cannot restyle the React shell.
+                    'react-legacy-widget-css' => [
+                        'type'    => 'Segment',
+                        'options' => [
+                            'route'    => 'react-legacy-widget-css',
+                            'defaults' => [
+                                'controller' => 'MelisCore\Controller\PluginView',
+                                'action'     => 'legacyWidgetCss',
+                            ],
+                        ],
+                    ],
                 ],
             ],
 
