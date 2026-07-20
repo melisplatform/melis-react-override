@@ -203,6 +203,28 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // below returns null → no resource is injected (no phantom load).
         if ($key === 'meliscms_page') {
             $roots['melisSB'] = true;
+            // The "Analytics" tab (module MelisCmsPageAnalytics, present only when installed) is
+            // wired INLINE into the page editor (meliscms → interface/meliscms_page/…) via `forward`
+            // links to module MelisCmsPageAnalytics — but the tab's scripts live under a SEPARATE
+            // plugin root, `meliscms_page_analytics_tool_config`, whose name matches no module. Neither
+            // the type walk nor the forward-by-name map reaches it, so pagehit.tool.js (which defines
+            // window.setPageId, used by the analytics DataTable's serverSide `dataFunction`) is never
+            // loaded → the table init calls setPageId → ReferenceError → empty analytics table.
+            // Add that root for the page editor. FULLY MODULAR: getItem() below returns null when the
+            // module is inactive → nothing injected (no phantom load).
+            $roots['meliscms_page_analytics_tool_config'] = true;
+        }
+
+        // The Orders list's own appsConfig tree (fetched above) only covers the list zone
+        // itself — an order's detail view (Invoice tab: regenerate/export buttons, forward
+        // module MelisCommerceOrderInvoice) is loaded LATER via an internal tabOpen/zoneReload
+        // AJAX call once the admin opens a specific order, so the `forward`-module walk above
+        // never sees it. Without meliscommerceorderinvoice.js, its delegated $('body') handlers
+        // (.regenerate-invoice / .export-invoice-pdf / .export-order-pdf) are never bound →
+        // clicking any of those buttons does nothing. Same fix shape as the melisSB case above:
+        // FULLY MODULAR, getItem() below returns null (no phantom load) if the module is absent.
+        if ($key === 'meliscommerce_order_list_page') {
+            $roots['meliscommerceorderinvoice'] = true;
         }
 
         // Module-owned asset adjustments (e.g. MelisAI forcing its module JS into the <head>
@@ -445,6 +467,9 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 
         $inlineGlobals = $assets['inline'] ?? '';
 
+        // TinyMCE configs, resolved server-side and inlined (see the <script> block below).
+        $tinyMceConfigsJs = $this->tinyMceConfigsScript();
+
         // Platform JS (bundle.js/jQuery + core extras) — in <head> so inline scripts inside the
         // tool HTML have jQuery & the platform globals at parse time.
         $platformJs = implode("\n", array_map(
@@ -452,9 +477,30 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             $assets['js'] ?? []
         ));
 
-        // Module ressources (e.g. melisCms.js) — at the END of <body>: they capture $("body") on
-        // load to bind delegated handlers, so <body> (and the tool HTML) must already exist, else
-        // the handlers attach to an empty set and the tool's buttons are dead.
+        // Module ressources (e.g. melisCms.js) — loaded inside <body>, after the tab strip but
+        // BEFORE the tool HTML (same bucket as the platform JS above), which is EXACTLY where the
+        // classic back-office loads them from: layoutCore.phtml echoes headScript() inside <body>,
+        // where $this->content is only the empty tab shell and every tool is AJAX-loaded afterwards.
+        //
+        // They must not go in <head>: like melisHelper, several capture $("body") at load time to
+        // bind delegated handlers ($body.on(...)) and would bind to an empty set — dead buttons.
+        // <body> already exists at this point, so those caches are fine here.
+        //
+        // They must not go at the END of <body> either (where they used to be), because the tool
+        // HTML is INLINE in this standalone page — unlike the classic BO, where it arrives later by
+        // AJAX. Loading them after the tool broke two things:
+        //   • Parse-time globals: the page editor's drag&drop iframe carries
+        //     onload="melisCms.iframeLoad(1)" and the zone emits an inline melisCms.disableCmsButtons(1),
+        //     both running before an end-of-body <script> could define melisCms → ReferenceError,
+        //     edition iframe never initialised.
+        //   • jQuery-ready ORDER: many ressources define their globals INSIDE $(function(){…})
+        //     (e.g. melispagehistoric.js → window.initHistoric). Tool inline scripts register their
+        //     own ready callback too (DataTable init with `data: initHistoric`). jQuery fires ready
+        //     callbacks in REGISTRATION order, so an end-of-body ressource always registered LAST and
+        //     its globals were undefined when the tool's callback ran → ReferenceError, empty table.
+        // Both orderings work in the classic BO precisely because the ressources load before any
+        // tool HTML; loading them here reproduces that. A ressource that needed the tool HTML present
+        // at load time could not work in the classic BO either, so nothing can depend on it.
         $ressourceJs = implode("\n", array_map(
             static fn($s) => '  <script src="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($s), ENT_QUOTES) . '"></script>',
             $assets['jsRessources'] ?? []
@@ -612,12 +658,25 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      strip fixes the caches; placing it before the tool HTML keeps jQuery available for the tool's
      own inline <script> blocks. -->
 {$platformJs}
+<!-- Module ressources (e.g. melisCms.js, melispagehistoric.js) — HERE, right after the platform JS
+     and still BEFORE the tool HTML, mirroring the classic back-office (which loads them while only
+     the empty tab shell exists). <body> is present so their $("body") caches work, and they run —
+     and register their \$(function(){…}) ready callbacks — before any inline script of the tool. See
+     the \$ressourceJs comment in buildToolPage() for the two bugs the old end-of-body slot caused. -->
+{$ressourceJs}
   <script>
-  /* TinyMCE config preload — needs melis_tinymce.js (loaded just above). The nested page-edition
-     iframe reads window.parent.melisTinyMCE.tinyMceConfigs[type]; this page IS that parent.
-     melis_tinymce.js only auto-preloads when window.self === window.top (our Envato shim can fail
-     that test in Chrome), so trigger it explicitly. Idempotent; harmless if already preloaded. */
-  try { if (window.melisTinyMCE && melisTinyMCE.getTinyMceConfig) melisTinyMCE.getTinyMceConfig(); } catch(e) {}
+  /* TinyMCE configs — needs melis_tinymce.js (loaded just above). The nested page-edition iframe
+     reads window.parent.melisTinyMCE.tinyMceConfigs[type] (melis_tinymce.js:38); this page IS that
+     parent. They are INLINED here (server-side, cf. tinyMceConfigsScript()) rather than fetched:
+     melisTinyMCE.getTinyMceConfig() is an ASYNC \$.ajax, and in this standalone page everything —
+     platform JS, tool HTML and the nested front iframe — parses in one shot, so the iframe reached
+     tinymce.init() BEFORE the response landed. createTinyMCE() then read tinyMceConfigs[type] as
+     undefined and built the editor from the bare dataString: no external_plugins, so every module
+     TinyMCE override was silently dropped (e.g. MelisAICommunityExtensions' minitemplate plugin,
+     which REGISTERS mini_templates_url — without it the mini-template dialog opened with an empty
+     list). The classic BO never hit this: its preload fires at shell load, long before any tool.
+     Inlining removes the race entirely; the async call stays as a fallback if inlining failed. */
+{$tinyMceConfigsJs}
   </script>
 <div id="content">
   <div class="tab-content" id="melis-id-body-content-load">
@@ -632,7 +691,6 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 <div id="melis-modals-container"></div>
 <script>{$extraScript}
 </script>
-{$ressourceJs}
 <script>
   /* Initialise the active tab id so classic tool handlers (scroll, edit, categories…)
      that read the global activeTabId don't throw before any tab is opened. */
@@ -1078,6 +1136,59 @@ HTML;
             ->addHeaderLine('Content-Type',  'text/html; charset=utf-8')
             ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN');
         return $response;
+    }
+
+    /**
+     * Inline JS that fills melisTinyMCE.tinyMceConfigs synchronously.
+     *
+     * Same source of truth as the classic back-office: MelisTinyMceController::preloadTinyMceConfig,
+     * whose `meliscore_tinymce_config` event is what lets modules inject their own TinyMCE settings
+     * (external_plugins, toolbars…). We call the action directly through the ControllerManager —
+     * NOT `new MelisTinyMceController()` — because the manager's initializer injects the shared
+     * EventManager; a hand-built controller would trigger the event on a private one and silently
+     * lose every module override, which is exactly the bug this method exists to fix.
+     *
+     * Falls back to the original async fetch if anything goes wrong (missing controller, throwing
+     * listener…), so a failure degrades to the previous behaviour instead of breaking the tool page.
+     */
+    private function tinyMceConfigsScript(): string
+    {
+        $fallback = '  try { if (window.melisTinyMCE && melisTinyMCE.getTinyMceConfig) melisTinyMCE.getTinyMceConfig(); } catch(e) {}';
+
+        try {
+            $controller = $this->getEvent()->getApplication()->getServiceManager()
+                ->get('ControllerManager')->get('MelisCore\Controller\MelisTinyMce');
+            $controller->setEvent($this->getEvent());
+
+            $result  = $controller->preloadTinyMceConfigAction();
+            $configs = $result instanceof JsonModel ? $result->getVariables() : null;
+            if ($configs instanceof \Traversable) {
+                $configs = iterator_to_array($configs);
+            }
+            if (!is_array($configs) || $configs === []) {
+                return $fallback;
+            }
+
+            // JSON_HEX_* keeps the payload safe inside <script> (no </script> break-out).
+            $json = json_encode(
+                $configs,
+                JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+            );
+            if ($json === false) {
+                return $fallback;
+            }
+
+            return "  try {\n"
+                 . "    var melisReactTinyMceConfigs = {$json};\n"
+                 . "    if (window.melisTinyMCE && melisTinyMCE.tinyMceConfigs) {\n"
+                 . "      for (var k in melisReactTinyMceConfigs) melisTinyMCE.tinyMceConfigs[k] = melisReactTinyMceConfigs[k];\n"
+                 . "    }\n"
+                 . "  } catch(e) {\n"
+                 . $fallback . "\n"
+                 . "  }";
+        } catch (\Throwable) {
+            return $fallback;
+        }
     }
 
     // ─── Rendu AJAX (widgets du dashboard React SANS iframe) ─────────────────
