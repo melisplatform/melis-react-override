@@ -41,6 +41,19 @@ return [
                             ],
                         ],
                     ],
+                    // JSON: the plugin's config form as DATA (tabs + typed fields + current values),
+                    // so the React dialog can render it natively instead of embedding the legacy
+                    // form HTML in an iframe. Save still goes through -config-save below.
+                    'react-dashboard-plugin-config-data' => [
+                        'type'    => 'Segment',
+                        'options' => [
+                            'route'    => 'react-dashboard-plugin-config-data',
+                            'defaults' => [
+                                'controller' => 'MelisCore\Controller\PluginView',
+                                'action'     => 'dashboardPluginConfigData',
+                            ],
+                        ],
+                    ],
                     // POST endpoint that validates + persists a legacy dashboard plugin's config
                     // (the Save button of the React config dialog). Isolated storage row so it
                     // never collides with the React layout/geometry save.

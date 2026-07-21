@@ -958,11 +958,31 @@ HTML;
             }
         }
 
+        // Valeurs de config ENREGISTRÉES pour ce plugin (cf. la modale engrenage). Servent à
+        // réaligner les contrôles de la vue sur la config réelle — plusieurs vues legacy codent
+        // « en dur » l'option cochée par défaut (cf. le script de synchro dans la page iframe).
+        //
+        // ⚠️ Restreint aux champs DÉCLARÉS dans `modal_form` : `getFormData()` renvoie TOUTE la
+        // config du plugin (name, icon, section, width: 6, height: 4…). Le script de synchro coche
+        // le contrôle qui porte la valeur ; sans ce filtrage, un `width: 6` irait cocher un bouton
+        // radio sans rapport valant « 6 ».
+        $savedConfig = [];
+        if (isset($melisPlugin)) {
+            try {
+                $d = $melisPlugin->getFormData();
+                if (is_array($d)) {
+                    $declared = $this->configFieldNames($pluginName);
+                    $savedConfig = $declared === [] ? [] : array_intersect_key($d, array_flip($declared));
+                }
+            } catch (\Throwable) {}
+        }
+
         return [
             'html'      => $html,
             'callbacks' => $jsCallBacks,
             'js'        => $jsRes,
             'css'       => $cssRes,
+            'config'    => $savedConfig,
         ];
     }
 
@@ -1025,6 +1045,26 @@ HTML;
         // testent `[data-melisKey="meliscore_dashboard"]`).
         $zoneId   = 'melis_react_dashboard_plugin';
         $zoneIdJs = json_encode($zoneId, JSON_UNESCAPED_SLASHES);
+        // Config enregistrée du plugin, injectée pour la synchro des contrôles (voir plus bas).
+        $savedConfigJs = json_encode(
+            array_filter(($render['config'] ?? []), static fn($v) => is_scalar($v)),
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+        ) ?: '{}';
+
+        // Grille Bootstrap : rétablit les largeurs `col-{sm,md,lg}-N` SANS media query.
+        //
+        // Les breakpoints s'évaluent sur la largeur du DOCUMENT — ici l'IFRAME du widget (~500-700px),
+        // pas la fenêtre. Un `col-md-6` (≥768px) ne s'applique donc jamais : toutes les colonnes
+        // s'empilent, là où le BO legacy (fenêtre large) les met côte à côte. Ex. le plugin
+        // « Indicators » (MelisCms), prévu en 2×2, se retrouvait en une seule colonne.
+        // On reproduit le rendu « fenêtre large » en figeant les pourcentages de la grille.
+        $gridFix = '';
+        foreach (['sm', 'md', 'lg', 'xl'] as $bp) {
+            for ($n = 1; $n <= 12; $n++) {
+                $pct = round($n / 12 * 100, 6);
+                $gridFix .= "    .col-{$bp}-{$n} { flex: 0 0 auto !important; width: {$pct}% !important; max-width: {$pct}% !important; }\n";
+            }
+        }
 
         $page = <<<HTML
 <!DOCTYPE html>
@@ -1037,16 +1077,8 @@ HTML;
        (ex. moxiemanager skin CSS, ou "melis/dashboard-plugin/…") se résout contre cette URL →
        "/melis/melis/dashboard-plugin/…" (404) ou une CSS renvoyant du HTML. <base href="/"> corrige. -->
   <base href="/" />
-  <style>body { margin: 0; overflow: auto; } .widget-header-content, .widget-header-actions { display: none !important; }
-    #melis-id-nav-bar-tabs { display: none !important; }
-    /* Le conteneur legacy du plugin est conservé (des plugins lisent leur config dans son DOM), mais
-       il est prévu pour vivre DANS une grille gridstack : .grid-stack-item est positionné en absolu
-       et l'en-tête .widget-head duplique le cadre React. On remet le tout en flux normal et on masque
-       le chrome legacy — seul le contenu du plugin reste visible. */
-    .grid-stack-item { position: static !important; width: auto !important; height: auto !important; left: auto !important; top: auto !important; }
-    .grid-stack-item-content { position: static !important; overflow: visible !important; }
-    .widget-head { display: none !important; }
-    .widget, .widget-inverse { margin: 0 !important; border: 0 !important; background: transparent !important; box-shadow: none !important; }</style>
+  <!-- Les surcharges de mise en page sont injectées APRES les feuilles du thème (voir
+       $overrideCss plus bas) : à spécificité égale, c'est la dernière règle qui gagne. -->
   <script>
   /* Neutralise bundle.js "Remove Envato Frame" guard — same shim as toolPageAction. */
   try { window.__melisRealParent = window.parent; } catch(e) {}
@@ -1103,6 +1135,134 @@ HTML;
 {$inlineGlobals}
   </script>
 {$cssLinks}
+  <style>/* !important + padding: le thème legacy (bundle.css, chargé APRÈS ce <style>) pose
+       `body { padding-top: 47px }` — la réserve pour sa navbar fixe, qui n'existe pas ici. Sans ça
+       le contenu du plugin démarre 47px trop bas dans la tuile React (grosse bande vide en haut). */
+    body { margin: 0 !important; padding: 0 !important; overflow: auto; }
+    /* ⚠️ Deux pièges vérifiés en mesurant la page réelle — ne pas retenter :
+       - `html, body { height: auto }` : le thème legacy pose `height: 100%` et TOUTE la mise en
+         page des plugins repose sur cette chaîne de pourcentages. La casser fait retomber les
+         hauteurs en `%` à zéro (calendrier effondré à ~135px, `body.scrollHeight` = 0).
+       - `overflow: auto !important` sur body : fait apparaître des barres de défilement DANS la
+         tuile, et le rendu est plus dégradé encore que le contenu simplement rogné.
+       Corollaire : `body` faisant toujours exactement la hauteur de l'iframe, `scrollHeight` y est
+       plafonné — mesurer le document pour dimensionner la tuile est circulaire et ne peut pas
+       fonctionner (la hauteur des tuiles vient donc de la config du plugin + redimensionnement
+       manuel). */
+    .widget-header-content, .widget-header-actions { display: none !important; }
+    #melis-id-nav-bar-tabs { display: none !important; }
+    /* Le conteneur legacy du plugin est conservé (des plugins lisent leur config dans son DOM), mais
+       il est prévu pour vivre DANS une grille gridstack : .grid-stack-item est positionné en absolu
+       et l'en-tête .widget-head duplique le cadre React. On remet le tout en flux normal et on masque
+       le chrome legacy — seul le contenu du plugin reste visible. */
+    .grid-stack-item { position: static !important; width: auto !important; height: auto !important; left: auto !important; top: auto !important; }
+    .grid-stack-item-content { position: static !important; overflow: visible !important; }
+    /* ⚠️ Masquer SEULEMENT l'en-tête du CONTENEUR (plugin-container.phtml :
+       .widget > .widget-parent > .widget-head), qui duplique le cadre React. Un `.widget-head`
+       tout court emportait aussi les en-têtes que certains plugins rendent DANS leur propre vue —
+       ex. MelisCmsProspectsStatisticsPlugin, dont la barre d'onglets (courbes / barres) vit dans
+       un `.widget.widget-tabs > .widget-head` : les onglets disparaissaient purement et simplement. */
+    .widget-parent > .widget-head { display: none !important; }
+    .widget, .widget-inverse { margin: 0 !important; border: 0 !important; background: transparent !important; box-shadow: none !important; }
+
+    /* Tab bar OF A PLUGIN'S OWN VIEW (kept visible by the rule above) — e.g.
+       MelisCmsProspectsStatisticsPlugin's lines/bars switch. Its tabs kept stacking as one
+       full-width row each, centered, instead of sitting side by side.
+       The legacy theme lays these out through a chain of rules gated on ancestors and on media
+       queries that the classic BO satisfies but this iframe does not (breakpoints resolve against
+       the IFRAME width, cf. \$gridFix). Rather than replicate that chain, pin the bar directly:
+       an explicit horizontal flex row, items at their natural width, left-aligned.
+       Scoped to `.widget-tabs > .widget-head` so it can never touch the hidden container header
+       nor the fake #melis-id-nav-bar-tabs strip in <body>. */
+    .widget.widget-tabs > .widget-head ul.nav-tabs {
+      display: flex !important;
+      flex-direction: row !important;
+      flex-wrap: nowrap !important;
+      justify-content: flex-start !important;
+      width: auto !important;
+      max-width: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      text-align: left !important;
+    }
+    .widget.widget-tabs > .widget-head ul.nav-tabs > li {
+      display: block !important;
+      flex: 0 0 auto !important;
+      width: auto !important;
+      max-width: none !important;
+      float: none !important;
+    }
+
+    /* Grille Bootstrap figée (cf. \$gridFix côté PHP) : les media queries s'évaluent sur la
+       largeur de l'iframe, pas de la fenêtre → sans ça toutes les colonnes s'empilent. */
+{$gridFix}
+    /* Colonne d'ESPACEMENT vide — ex. le `<div class="col-md-2"></div>` de l'annonce, qui décale
+       la frise dans la fenêtre large du BO legacy. Dans une tuile étroite elle mange ~17% de la
+       largeur pour rien (et depuis que la grille ci-dessus ne s'empile plus, elle ne disparaît
+       plus d'elle-même). On la retire et on laisse sa voisine occuper toute la place. */
+    .row > [class*="col-"]:empty { display: none !important; }
+    .row:has(> [class*="col-"]:empty) > [class*="col-"]:not(:empty) { flex: 1 1 auto !important; width: auto !important; max-width: none !important; }
+
+    /* EXCEPTION à la règle ci-dessus : la frise (.layout-timeline, plugin Annonces) a besoin de sa
+       gouttière — ses libellés de date sont en `position:absolute` à `left:-160px` et le rail rouge
+       à `-45px`. Retirer la colonne vide les tronquait. On la conserve donc, mais calibrée au strict
+       nécessaire au lieu des 2/12 de la largeur : sur une tuile large, c'est autant de place rendue
+       au contenu, sans rien perdre du rail ni des dates.
+       Calibrage : tout est suspendu au décalage du libellé. Le thème le pose à `left:-160px` avec
+       35px de padding et un trait de liaison de 45px — soit ~115px à réserver À GAUCHE du contenu.
+       Rogner les paddings internes ne sert à RIEN (ce qu'on leur retire, la gouttière doit le
+       rendre) : on resserre donc la frise elle-même — libellé à -130px, trait et pastille
+       raccourcis d'autant, rail remonté à -24px — puis on ramène la colonne à 92px.
+       Gain net ≈ 30px vers la gauche. En dessous, « JUL 23, 2026 » passerait sur deux lignes. */
+    .row:has(.layout-timeline) > [class*="col-"]:empty { display: block !important; flex: 0 0 76px !important; width: 76px !important; max-width: 76px !important; }
+    /* Le libellé n'est plus une BOÎTE FIXE de 100px calée à `left:-160px` (elle réservait sa
+       largeur même pour un texte court, d'où le retrait persistant) : on l'accroche au bord du
+       contenu (`right:100%`) et on le laisse se dimensionner sur son texte. Trait de liaison,
+       pastille et rail suivent ; la gouttière n'a plus qu'à couvrir le libellé le plus long. */
+    /* `margin-right` = respiration entre le libellé et le RAIL (qui tombe 20px à gauche du
+       contenu) : 40px de marge - 20px de rail = 20px d'air. Le trait de liaison est rallongé
+       d'autant pour continuer à relier le libellé à la carte, et la pastille reste centrée
+       sur le rail (bord droit du libellé + 24px - 8px de large → centre à -20px). */
+    /* ⚠️ `position: absolute` EXPLICITE. Sous ~991px de large — ce qui arrive dès qu'on ZOOME,
+       le zoom réduisant la largeur en pixels CSS — le thème bascule le libellé en
+       `position: relative`. Or `right: 100%` sur un élément RELATIF le décale de 100% de la
+       largeur du conteneur vers la gauche : les dates partaient hors écran (« les labels ont
+       disparu »). Même raison pour la pastille/le trait, que ce même bloc masque. */
+    .layout-timeline ul.timeline > li .type { position: absolute !important; left: auto !important; right: 100% !important; margin: 0 40px 0 0 !important; width: auto !important; white-space: nowrap !important; padding: 0 !important; text-align: right !important; }
+    .layout-timeline ul.timeline > li .type::after { display: block !important; right: -40px !important; width: 34px !important; }
+    .layout-timeline ul.timeline > li .type::before { display: block !important; right: -24px !important; }
+    .layout-timeline ul.timeline > li .type .time { position: absolute !important; top: 24px !important; left: auto !important; right: 0 !important; }
+    .layout-timeline ul.timeline > li.active::before { display: block !important; left: -20px !important; }
+
+    /* ── Reprise de mise en page : bloc « KPI + derniers prospects » (MelisCmsProspects) ──
+       Le markup legacy juxtapose un `.col-sm-3` (icône + total) et un `.col-sm-9` (table) dans un
+       `.row-merge` : les deux colonnes ne font pas la même hauteur, une hairline `.border-bottom`
+       traîne sous le KPI, et surtout Bootstrap 5 REPEINT les cellules de `thead.bg-primary` via
+       `--bs-table-bg` → l'en-tête de table perd son fond et devient illisible/plat.
+       Corrigé ICI (page iframe du dashboard React) et pas dans la vue du module : le BO legacy
+       n'est pas touché. `:has()` cible le bloc sans dépendre d'un id de plugin. */
+    .row-merge:has(.pros-dash-tbl) { display: flex; align-items: stretch; }
+    /* `flex: 1` + `min-width: 0` : sans ça la colonne table se dimensionne sur son CONTENU
+       (largeur intrinsèque de la table) au lieu d'occuper la place restante — d'où le grand
+       vide à droite. `min-width: 0` autorise en plus le rétrécissement sous cette largeur. */
+    .row-merge:has(.pros-dash-tbl) > .col-sm-3 { flex: 0 0 25%; max-width: 25%; }
+    /* Filet vertical entre colonnes « mergées », dessiné par le thème legacy en pseudo-élément
+       (`.row-merge > [class*=col-] ~ [class*=col-]:after`) — pas une bordure, d'où l'impossibilité
+       de le retirer côté colonne. */
+    .row-merge:has(.pros-dash-tbl) > [class*="col-"]::after { display: none !important; }
+    .row-merge:has(.pros-dash-tbl) > .col-sm-9 { flex: 1 1 auto; min-width: 0; max-width: none; }
+    .row-merge:has(.pros-dash-tbl) > [class*="col-"] { display: flex; flex-direction: column; justify-content: center; }
+    .row-merge:has(.pros-dash-tbl) > .col-sm-3 .border-bottom { border-bottom: 0 !important; }
+    .row-merge:has(.pros-dash-tbl) .overflow-x { width: 100%; }
+    /* Le graphique flot mesure SON conteneur : si la ligne/colonne ne fait pas toute la largeur,
+       le canvas naît étroit. On force la rangée du graphe et son porte-graphe à 100%. */
+    .row-merge:has(.flotchart-holder) > [class*="col-"] { flex: 1 1 auto; width: 100%; max-width: none; }
+    .flotchart-holder { width: 100% !important; }
+    .pros-dash-tbl { width: 100%; margin: 0 !important; border-top: 0 !important; }
+    .pros-dash-tbl thead th { background: #932e2a !important; color: #fff !important; border: 0 !important; font-weight: 600; padding: 8px 12px !important; white-space: nowrap; }
+    .pros-dash-tbl tbody td { padding: 9px 12px !important; border-top: 1px solid #f0f0f0 !important; vertical-align: middle; }
+    .pros-dash-tbl tbody tr:hover td { background: #fafafa; }
+    .pros-dash-tbl .pros-dash-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }</style>
 </head>
 <body>
 <!-- Barre d'onglets factice (cachée). melisCore.js, à son init, ÉCRASE le global activeTabId avec
@@ -1121,11 +1281,127 @@ HTML;
      chargement (`var \$navTabs = \$("#melis-id-nav-bar-tabs")`). Chargé depuis <head>, ce cache est
      VIDE (pas encore de <body>) → activeTabId retombe à undefined quoi qu'on fasse. -->
 {$headJs}
-<div id="{$zoneId}" data-melisKey="meliscore_dashboard">
+<!-- `container-level-a`: the legacy theme gates part of its dashboard rules on this ancestor —
+     the classic BO zone carries it (render-dashboard-plugins.phtml). Without it, a plugin's tab
+     bar (`.widget-tabs-responsive`, e.g. MelisCmsProspectsStatisticsPlugin) loses its
+     `display:inline-block` (styles.css) and the tabs stack as full-width rows instead of sitting
+     side by side. The class is only a HOOK (no rule targets it on its own), so we add it WITHOUT
+     the legacy `tab-pane`, which would hide the zone for lack of `.active`. -->
+<div id="{$zoneId}" class="container-level-a" data-melisKey="meliscore_dashboard">
 {$html}
 </div>
 {$bodyJs}
 {$callbackBlocks}
+<script>
+/* ── Synchronise les contrôles de la vue avec la config ENREGISTRÉE ───────────────────────
+   Plusieurs vues de plugins legacy codent EN DUR l'option cochée par défaut, p.ex.
+   commerce-dashboard-plugin-sales-revenue.phtml :
+
+       <input … value="hourly" checked>                 ← toujours coché
+       <label class="… <?= (\$activeFilter=='hourly') ? 'focus' : '' ?>">
+
+   La config choisie n'ajoute qu'une classe `focus` discrète (et un `data-activefilter` que le JS
+   lit pour tracer la BONNE série). Résultat : le graphique affiche « weekly » pendant que le
+   bouton « Hourly » reste surligné — l'utilisateur lit une valeur fausse.
+
+   On réaligne donc les contrôles sur la config réelle. Générique : on ne connaît pas les noms de
+   champs des plugins, mais un contrôle qui PORTE la valeur enregistrée est le contrôle à activer.
+   On ne déclenche PAS d'évènement `change` : la vue a déjà été rendue avec la bonne donnée, un
+   change relancerait un tracé inutile. */
+(function(){
+  var cfg = {$savedConfigJs};
+  var host = document.getElementById({$zoneIdJs});
+  if (!host || !cfg) return;
+  function sync(){
+    Object.keys(cfg).forEach(function(key){
+      var value = String(cfg[key]);
+      if (value === '') return;
+      /* Radios/cases portant cette valeur → cocher, et décocher le reste du groupe. */
+      var inputs = host.querySelectorAll('input[type=radio][value="' + (window.CSS && CSS.escape ? CSS.escape(value) : value) + '"]');
+      Array.prototype.forEach.call(inputs, function(input){
+        if (input.name) {
+          Array.prototype.forEach.call(host.querySelectorAll('input[type=radio][name="' + input.name + '"]'), function(sib){
+            sib.checked = false;
+            /* Le thème marque le bouton actif via la classe du <label> associé. */
+            var lbl = sib.id ? host.querySelector('label[for="' + sib.id + '"]') : null;
+            if (lbl) lbl.classList.remove('active', 'focus');
+          });
+        }
+        input.checked = true;
+        var lbl = input.id ? host.querySelector('label[for="' + input.id + '"]') : null;
+        if (lbl) lbl.classList.add('active', 'focus');
+      });
+      /* <select> proposant cette valeur. */
+      Array.prototype.forEach.call(host.querySelectorAll('select'), function(sel){
+        if (sel.value !== value && Array.prototype.some.call(sel.options, function(o){ return o.value === value; })) {
+          sel.value = value;
+        }
+      });
+    });
+  }
+  sync();
+  /* Certaines vues (re)dessinent leurs boutons dans un jsCallback : on repasse après coup. */
+  [150, 600, 1500].forEach(function(ms){ window.setTimeout(sync, ms); });
+})();
+</script>
+<script>
+/* ── Hauteur réelle du contenu, remontée à la tuile React ─────────────────────────────────
+   Mesurer le DOCUMENT ne marche pas : le thème legacy pose `body { height: 100% }`, donc
+   `scrollHeight` vaut toujours exactement la hauteur de l'iframe — la mesure suit la tuile au
+   lieu de la déterminer (circulaire). Le CONTENEUR du plugin n'est pas fiable non plus : son
+   contenu legacy est souvent hors flux, il retombe alors à 0 (cas du calendrier).
+
+   On balaie donc les ÉLÉMENTS et on retient le bord inférieur le plus bas. Un rectangle reste
+   exact même quand l'ancêtre s'effondre ou rogne (`getBoundingClientRect` décrit la géométrie,
+   indépendamment de tout `overflow:hidden`). Vérifié sur le plugin Prospects : 802px mesurés
+   aussi bien dans une iframe de 319px que de 2400px — la valeur est STABLE, donc exploitable.
+
+   ⚠️ `window.parent` est shimmé vers `window` en tête de page (garde anti frame-buster) :
+   poster dessus reviendrait à se parler à soi-même. Le vrai parent est dans `__melisRealParent`. */
+(function(){
+  function measure(){
+    var body = document.body;
+    if (!body) return 0;
+    var top = body.getBoundingClientRect().top, max = 0;
+    var els = body.getElementsByTagName('*');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i], r = el.getBoundingClientRect();
+      if (!r.height) continue;
+      var s = window.getComputedStyle(el);
+      /* `fixed` = surcouches (enjoyhint…), jamais du contenu de plugin. */
+      if (s.position === 'fixed' || s.display === 'none' || s.visibility === 'hidden') continue;
+      var bottom = r.bottom - top + (parseFloat(s.marginBottom) || 0);
+      if (bottom > max) max = bottom;
+    }
+    return Math.ceil(max);
+  }
+  var last = 0;
+  function report(){
+    var px = measure();
+    if (px <= 0 || px === last) return;
+    last = px;
+    try {
+      var target = window.__melisRealParent;
+      if (target && target !== window) target.postMessage({ __melisPluginHeight: true, px: px }, '*');
+    } catch (e) {}
+  }
+  report();
+  if (window.ResizeObserver && document.body) {
+    var pending = 0;
+    var ro = new ResizeObserver(function(){
+      /* Coalescé en une frame : un redessin de graphique émet des dizaines de mutations. */
+      if (pending) return;
+      pending = requestAnimationFrame(function(){ pending = 0; report(); });
+    });
+    ro.observe(document.body);
+    var host = document.getElementById({$zoneIdJs});
+    if (host) ro.observe(host);
+  }
+  /* Filet : les graphiques flot sont dessinés bien après `load`, et certains redimensionnements
+     internes ne font bouger aucun élément observé. */
+  [200, 600, 1500, 3000].forEach(function(ms){ window.setTimeout(report, ms); });
+})();
+</script>
 </body>
 </html>
 HTML;
@@ -1134,6 +1410,11 @@ HTML;
         $response->setContent($page);
         $response->getHeaders()
             ->addHeaderLine('Content-Type',  'text/html; charset=utf-8')
+            // Document d'iframe à URL FIXE : sans ça le navigateur en ressert volontiers une copie
+            // en cache, et toute correction de mise en page semble « ne rien changer » tant qu'on
+            // ne vide pas le cache. Le contenu dépend en plus de l'utilisateur connecté.
+            ->addHeaderLine('Cache-Control', 'no-store, no-cache, must-revalidate')
+            ->addHeaderLine('Pragma', 'no-cache')
             ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN');
         return $response;
     }
@@ -1694,6 +1975,144 @@ HTML;
      * POST /melis/react-dashboard-plugin-config-save   (form-urlencoded: plugin + form fields)
      * Response: { success: bool, errors?: array }
      */
+    /**
+     * Noms des champs réellement DÉCLARÉS dans le formulaire de config d'un plugin (`modal_form`).
+     *
+     * Sert à distinguer les vraies options utilisateur du reste de la config du plugin (libellés,
+     * icône, géométrie…), que `getFormData()` renvoie pêle-mêle.
+     *
+     * @return string[]
+     */
+    private function configFieldNames(string $pluginName): array
+    {
+        try {
+            $conf = $this->getServiceManager()->get('MelisCoreConfig')->getItem(
+                '/meliscore/interface/melis_dashboardplugin/interface/melisdashboardplugin_section/interface/' . $pluginName
+            ) ?: [];
+        } catch (\Throwable) {
+            return [];
+        }
+
+        $names = [];
+        foreach (($conf['modal_form'] ?? []) as $tabConf) {
+            foreach (($tabConf['elements'] ?? []) as $el) {
+                if (!empty($el['spec']['name'])) $names[] = (string) $el['spec']['name'];
+            }
+        }
+        return array_values(array_unique($names));
+    }
+
+    /**
+     * Config d'un plugin dashboard exposée en DONNÉES (et non en HTML).
+     *
+     * La modale legacy rend les formulaires Laminas en HTML puis les affiche dans une iframe. Ici
+     * on renvoie la SPEC : onglets + champs typés + valeurs courantes, pour que la modale React
+     * dessine le formulaire avec ses propres composants (même look que le reste du back-office).
+     *
+     * Source : le même noeud de config que `getPluginConfig()` (`$this->pluginConfig` étant
+     * protégé, on relit l'item plutôt que d'y accéder par réflexion), + `getFormData()` pour les
+     * valeurs enregistrées. Les libellés `tr_*` sont traduits ici — le front n'a pas à les connaître.
+     *
+     * L'enregistrement reste inchangé (`dashboardPluginConfigSaveAction`) : les champs portent les
+     * mêmes `name` que le formulaire legacy, donc le POST est identique et toute la validation
+     * Laminas continue de s'appliquer.
+     *
+     * Usage : GET /melis/react-dashboard-plugin-config-data?plugin=MelisCommerceDashboardPluginSalesRevenue
+     */
+    public function dashboardPluginConfigDataAction()
+    {
+        $pluginName = $this->getRequest()->getQuery('plugin', '');
+        if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
+            $this->getResponse()->setStatusCode(400);
+            return new JsonModel(['success' => false, 'error' => 'Invalid plugin']);
+        }
+
+        $sm = $this->getServiceManager();
+
+        $translator = null;
+        try { $translator = $sm->get('translator'); } catch (\Throwable) {}
+        $tr = static function ($key) use ($translator) {
+            $key = (string) $key;
+            // Seules les clés `tr_*` sont des libellés traduisibles ; le reste est déjà littéral.
+            if ($key === '' || !$translator || !str_starts_with($key, 'tr_')) return $key;
+            try { $t = (string) $translator->translate($key); return $t !== '' ? $t : $key; } catch (\Throwable) { return $key; }
+        };
+
+        // Valeurs enregistrées. `getFormData()` a besoin que la config du plugin ait été chargée.
+        $values = [];
+        try {
+            $melisPlugin = $sm->get('ControllerPluginManager')->get($pluginName);
+            $melisPlugin->setUpdatesPluginConfig(['dashboard_id' => self::REACT_DASHBOARD_CONFIG_ID, 'plugin_id' => $pluginName]);
+            $melisPlugin->getPluginConfig();
+            $data = $melisPlugin->getFormData();
+            if (is_array($data)) $values = $data;
+        } catch (\Throwable) {
+            // Plugin non instanciable : on rendra quand même les champs, sans valeurs.
+        }
+
+        $conf = [];
+        try {
+            $conf = $sm->get('MelisCoreConfig')->getItem(
+                '/meliscore/interface/melis_dashboardplugin/interface/melisdashboardplugin_section/interface/' . $pluginName
+            ) ?: [];
+        } catch (\Throwable) {}
+
+        $tabs = [];
+        foreach (($conf['modal_form'] ?? []) as $tabKey => $tabConf) {
+            if (!is_array($tabConf)) continue;
+            $required = [];
+            foreach (($tabConf['input_filter'] ?? []) as $fName => $fConf) {
+                $required[$fName] = !empty($fConf['required']);
+            }
+
+            $fields = [];
+            foreach (($tabConf['elements'] ?? []) as $el) {
+                $spec = $el['spec'] ?? null;
+                if (!is_array($spec) || empty($spec['name'])) continue;
+                $name = (string) $spec['name'];
+                $type = strtolower((string) ($spec['type'] ?? 'text'));
+
+                // `value_options` d'un Select/Radio : [valeur => libellé], libellés traduisibles.
+                $options = [];
+                foreach (($spec['options']['value_options'] ?? []) as $optValue => $optLabel) {
+                    $options[] = ['value' => (string) $optValue, 'label' => $tr($optLabel)];
+                }
+
+                $fields[] = [
+                    'name'     => $name,
+                    'type'     => $type,
+                    'label'    => $tr($spec['options']['label'] ?? $name),
+                    'value'    => array_key_exists($name, $values) ? $values[$name] : ($spec['attributes']['value'] ?? ''),
+                    'options'  => $options,
+                    'required' => $required[$name] ?? false,
+                    'rows'     => (int) ($spec['attributes']['rows'] ?? 0),
+                ];
+            }
+
+            $tabs[] = [
+                'id'     => (string) $tabKey,
+                'name'   => $tr($tabConf['tab_title'] ?? $tabKey),
+                'icon'   => (string) ($tabConf['tab_icon'] ?? 'fa fa-cog'),
+                'fields' => $fields,
+            ];
+        }
+
+        // « Vide » = aucun champ éditable, tous onglets confondus → la modale affiche un message
+        // et masque le bouton d'enregistrement (même règle que la modale legacy).
+        $hasFields = false;
+        foreach ($tabs as $t) { if ($t['fields'] !== []) { $hasFields = true; break; } }
+
+        return new JsonModel([
+            'success' => true,
+            'data'    => [
+                'empty'      => !$hasFields,
+                'tabs'       => $tabs,
+                'emptyLabel' => $tr('tr_meliscore_dashboard_plugin_common_tab_properties'),
+                'saveLabel'  => $tr('tr_meliscore_plugins_modal_apply'),
+            ],
+        ]);
+    }
+
     public function dashboardPluginConfigSaveAction()
     {
         $request = $this->getRequest();
