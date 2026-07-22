@@ -1000,7 +1000,18 @@ HTML;
             return $this->getResponse();
         }
 
-        $sm     = $this->getServiceManager();
+        $sm = $this->getServiceManager();
+
+        // Rights gate: without it a forged ?plugin=... URL would render a plugin the user's
+        // usr_rights doesn't grant. Same key/service as legacy (the plugin class name).
+        try {
+            $rightsSvc = $sm->get('MelisCoreDashboardPluginsService');
+            if (!$rightsSvc->canAccess($pluginName)) {
+                $this->getResponse()->setStatusCode(403);
+                return $this->getResponse();
+            }
+        } catch (\Throwable) {}
+
         $render = $this->renderDashboardPlugin($pluginName);
 
         if ($render === null) {
@@ -1045,6 +1056,7 @@ HTML;
         // testent `[data-melisKey="meliscore_dashboard"]`).
         $zoneId   = 'melis_react_dashboard_plugin';
         $zoneIdJs = json_encode($zoneId, JSON_UNESCAPED_SLASHES);
+        $dashboardIdJs = json_encode(self::REACT_DASHBOARD_CONFIG_ID, JSON_UNESCAPED_SLASHES);
         // Config enregistrée du plugin, injectée pour la synchro des contrôles (voir plus bas).
         $savedConfigJs = json_encode(
             array_filter(($render['config'] ?? []), static fn($v) => is_scalar($v)),
@@ -1149,6 +1161,13 @@ HTML;
        plafonné — mesurer le document pour dimensionner la tuile est circulaire et ne peut pas
        fonctionner (la hauteur des tuiles vient donc de la config du plugin + redimensionnement
        manuel). */
+    /* La zone porte `tab-pane active` (voir le <div> plus bas) uniquement pour que les scripts de
+       plugin retrouvent leur graphique via `closest('.tab-pane')`. On annule le seul effet visuel
+       de cette classe qui nous gêne : `.tab-pane.active { overflow: hidden }` (bundle.css) rognerait
+       les décorations posées en NÉGATIF hors de la zone — libellés de date et rail de la frise du
+       plugin Annonces (`right:100%`, `left:-20px`, cf. plus bas). Dans le BO legacy la zone est bien
+       plus large que son contenu, ici elle en épouse les bords. */
+    #{$zoneId}.tab-pane.active { overflow: visible !important; }
     .widget-header-content, .widget-header-actions { display: none !important; }
     #melis-id-nav-bar-tabs { display: none !important; }
     /* Le conteneur legacy du plugin est conservé (des plugins lisent leur config dans son DOM), mais
@@ -1196,6 +1215,38 @@ HTML;
     /* Grille Bootstrap figée (cf. \$gridFix côté PHP) : les media queries s'évaluent sur la
        largeur de l'iframe, pas de la fenêtre → sans ça toutes les colonnes s'empilent. */
 {$gridFix}
+    /* Même piège que \$gridFix, côté ESPACEMENTS : les media queries s'évaluant sur la largeur de
+       l'iframe (~500-700px), les règles « mobile » (max-width) des modules s'appliquent à tort et
+       suppriment des marges prévues pour le petit écran. Cas vérifié : melis-cms
+       (public/css/styles.css) pose `@media (max-width:768px){ .cms-page-indicators-plugin .innerAll
+       { margin:0 } }` → dans le BO classique les 4 tuiles du plugin Indicateurs sont séparées
+       (margin 5px 0), dans la tuile React elles se collent verticalement. On rétablit la valeur
+       « fenêtre large ». */
+    .cms-page-indicators-plugin .innerAll { margin: 5px 0 !important; }
+    /* ── Responsive floor, applied to EVERY legacy plugin ─────────────────────────────────
+       The frozen grid above keeps a plugin's proportions identical at any tile size, which is
+       what we want — but proportions alone are not enough: a 25% column in a narrow tile is
+       genuinely narrow, and legacy views were written for the wide classic BO. Anything with an
+       intrinsic width then punches out of its box and the tile scrolls sideways (or clips).
+       These rules are the floor that makes every plugin survive any width; per-plugin fixes
+       below stay reserved for layouts that need real reshaping. */
+    /* Media never wider than its column. `height: auto` keeps the aspect ratio — but it must NOT
+       reach <canvas>: flot sizes its canvas itself (attribute width/height + inline style), and
+       forcing `height: auto` there squashes the chart to zero. */
+    img, svg, video { max-width: 100% !important; height: auto; }
+    canvas { max-width: 100% !important; }
+    /* Long unbreakable tokens — e-mail addresses, URLs, slugs — are the usual overflow culprit in
+       plugin tables and lists. `break-word` only breaks when the word alone cannot fit, so normal
+       text keeps wrapping normally. */
+    #{$zoneId} { overflow-wrap: break-word; }
+    /* A table cannot shrink below the intrinsic width of its content, so a wide table in a narrow
+       tile WILL overflow whatever we do — the only sane answer is to let it scroll on its own,
+       rather than pushing the whole plugin sideways. `.overflow-x` is the legacy theme's own hook
+       for this; `.melis-scroll-x` is the wrapper we add (see script below) to the tables that have
+       none. `max-width` keeps the table itself from stretching its wrapper. */
+    table { max-width: 100%; }
+    .overflow-x, .melis-scroll-x { overflow-x: auto !important; max-width: 100%; }
+
     /* Colonne d'ESPACEMENT vide — ex. le `<div class="col-md-2"></div>` de l'annonce, qui décale
        la frise dans la fenêtre large du BO legacy. Dans une tuile étroite elle mange ~17% de la
        largeur pour rien (et depuis que la grille ci-dessus ne s'empile plus, elle ne disparaît
@@ -1285,13 +1336,81 @@ HTML;
      the classic BO zone carries it (render-dashboard-plugins.phtml). Without it, a plugin's tab
      bar (`.widget-tabs-responsive`, e.g. MelisCmsProspectsStatisticsPlugin) loses its
      `display:inline-block` (styles.css) and the tabs stack as full-width rows instead of sitting
-     side by side. The class is only a HOOK (no rule targets it on its own), so we add it WITHOUT
-     the legacy `tab-pane`, which would hide the zone for lack of `.active`. -->
-<div id="{$zoneId}" class="container-level-a" data-melisKey="meliscore_dashboard">
+     side by side. The class is only a HOOK (no rule targets it on its own).
+
+     `tab-pane active`: the classic BO zone is a Bootstrap tab pane, and plugin scripts LOCATE THEIR
+     OWN CHART through that ancestor — the filter buttons (Hourly/Daily/Weekly/Monthly of
+     MelisCommerceDashboardPluginSalesRevenue, Daily/Monthly/Yearly of MelisCmsProspectsStatisticsPlugin)
+     all do `\$(this).closest('.tab-pane[.active]').find('.flotchart-holder')` to get the placeholder id
+     they must redraw. Without the class that lookup returns an EMPTY set → the id is `undefined`,
+     `data-activefilter` is written nowhere and the redraw targets `\$('#undefined')`: clicking a
+     filter did strictly nothing. The pair MUST be added together — `tab-pane` alone is
+     `display:none` (bundle.css), `active` brings it back; this is exactly what the legacy BO and
+     our own tool page (`buildToolPage`) carry. -->
+<div id="{$zoneId}" class="container-level-a tab-pane active" data-melisKey="meliscore_dashboard">
 {$html}
 </div>
 {$bodyJs}
 {$callbackBlocks}
+<script>
+/* ── `melisDashBoardDragnDrop.refreshWidget` : version iframe ─────────────────────────────
+   C'est LE point d'entrée par lequel un plugin legacy se recharge lui-même sans recharger la
+   page — pagination du plugin Annonces (`.announcement-pagination .page-link`, announcement.tools.js),
+   et tout autre contrôle du même genre.
+
+   L'original (gridstack.init.js) est écrit pour le dashboard legacy : il POSTe bien vers
+   `getPlugin`, mais réinjecte ensuite le HTML via la GRILLE gridstack
+   (`\$('#'+activeTabId+' .grid-stack').data('gridstack')` → `removeWidget`/`addWidget`). Ici il n'y a
+   pas de grille — chaque plugin vit seul dans son iframe, la grille est côté React. `grid` est donc
+   `undefined`, les appels sont court-circuités par l'optional chaining, et le clic ne produit
+   RIEN : la requête part, la réponse est jetée. D'où « la pagination ne marche pas ».
+
+   On garde donc l'échange réseau à l'identique (même URL, mêmes paramètres, `additionalParam`
+   compris — c'est lui qui porte le `next` de la pagination) et on remplace uniquement la pose du
+   résultat : le HTML retourné écrase le contenu de la zone, sur place.
+
+   `dashboard_id` : l'original envoie `activeTabId`, qui dans cette page est l'id du wrapper, pas un
+   dashboard. On envoie l'id de config du dashboard React — le même qu'au rendu initial — pour que
+   le plugin retrouve SES réglages enregistrés au rechargement. */
+(function(){
+  var jq = window.jQuery;
+  if (!jq || !window.melisDashBoardDragnDrop) return;
+
+  window.melisDashBoardDragnDrop.refreshWidget = function(el, additionalParam){
+    var host = document.getElementById({$zoneIdJs});
+    if (!host) return;
+    var zone = jq(host);
+    var cfgTxt = zone.find('.dashboard-plugin-json-config').first().text();
+    if (!cfgTxt) return;
+
+    var cfg;
+    try { cfg = JSON.parse(cfgTxt); } catch (e) { return; }
+
+    var fields = [{ name: 'dashboard_id', value: {$dashboardIdJs} }];
+    jq.each(cfg, function(name, value){
+      fields.push({
+        name: name,
+        value: (value !== null && typeof value === 'object') ? JSON.stringify(value) : value
+      });
+    });
+    jq.each(additionalParam || {}, function(name, value){ fields.push({ name: name, value: value }); });
+
+    zone.css('opacity', 0.5);
+    jq.post('/melis/MelisCore/DashboardPlugins/getPlugin', fields)
+      .done(function(data){
+        if (data && data.html) {
+          zone.html(data.html);
+          /* Le plugin rechargé réinitialise son JS via ses callbacks (graphiques, handlers non
+             délégués). `eval` comme dans l'original — le contenu vient du serveur. */
+          jq.each(data.jsCallbacks || [], function(i, cb){
+            try { eval(cb); } catch (e) { console.warn(e); }
+          });
+        }
+      })
+      .always(function(){ zone.css('opacity', ''); });
+  };
+})();
+</script>
 <script>
 /* ── Synchronise les contrôles de la vue avec la config ENREGISTRÉE ───────────────────────
    Plusieurs vues de plugins legacy codent EN DUR l'option cochée par défaut, p.ex.
@@ -1342,6 +1461,124 @@ HTML;
   sync();
   /* Certaines vues (re)dessinent leurs boutons dans un jsCallback : on repasse après coup. */
   [150, 600, 1500].forEach(function(ms){ window.setTimeout(sync, ms); });
+})();
+</script>
+<script>
+/* ── Give every plugin table its own horizontal scroller ──────────────────────────────────
+   A table cannot shrink below its content's intrinsic width. In the wide classic BO that never
+   shows; in a narrow tile the table pushes the whole plugin sideways. Some legacy views already
+   wrap their table in the theme's `.overflow-x` (prospects, commerce orders) — most do not
+   (bubble-updates, bubble-notifications…). We add the missing wrapper so the table scrolls
+   inside its own box instead of dragging the plugin with it.
+
+   Only tables with no scrollable ancestor INSIDE the plugin are wrapped, so a view that already
+   handles it keeps its own markup untouched. Tables can arrive later (AJAX, `refreshWidget`),
+   hence the rescans — same cadence as the chart observer below. */
+(function(){
+  var host = document.getElementById({$zoneIdJs});
+  if (!host) return;
+
+  function hasScroller(el){
+    for (var p = el.parentNode; p && p !== host; p = p.parentNode) {
+      if (p.nodeType !== 1) continue;
+      if (p.classList.contains('overflow-x') || p.classList.contains('melis-scroll-x')) return true;
+      var ox = window.getComputedStyle(p).overflowX;
+      if (ox === 'auto' || ox === 'scroll') return true;
+    }
+    return false;
+  }
+
+  function wrap(){
+    var tables = host.getElementsByTagName('table');
+    /* Live HTMLCollection + we reparent as we go: snapshot first. */
+    var list = Array.prototype.slice.call(tables);
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (!t.parentNode || hasScroller(t)) continue;
+      var box = document.createElement('div');
+      box.className = 'melis-scroll-x';
+      t.parentNode.insertBefore(box, t);
+      box.appendChild(t);
+    }
+  }
+
+  wrap();
+  [200, 600, 1500, 3000].forEach(function(ms){ window.setTimeout(wrap, ms); });
+})();
+</script>
+<script>
+/* ── Redraw flot charts when the tile is resized ──────────────────────────────────────────
+   A flot chart is a CANVAS painted ONCE, at the holder's dimensions at draw time. Widening the
+   tile widens the holder (`.flotchart-holder { width: 100% }`) but NOT the already-painted
+   canvas: the chart keeps its original width with empty space to its right (observed on
+   MelisCmsProspectsStatisticsPlugin).
+
+   `jquery.flot.resize` IS loaded, but it relies on Ben Alman's "jQuery resize event" plugin,
+   which POLLS elements through requestAnimationFrame/setTimeout: inside this iframe that loop
+   does not reliably catch the tile being resized. So we observe the holder ourselves
+   (ResizeObserver — exact and immediate) and ask flot to repaint, running the very same
+   sequence as the official plugin (`resize` + `setupGrid` + `draw`).
+
+   Generic, with no per-plugin knowledge: a flot holder is the PARENT of a `canvas.flot-base`,
+   and flot stores its instance there under `data('plot')`. Charts are drawn well after `load`
+   (AJAX) — and a hidden tab only draws when opened — so we rescan periodically to pick up
+   newcomers. */
+(function(){
+  var jq = window.jQuery;
+  if (!jq || !window.ResizeObserver) return;
+
+  var seen = new WeakSet();
+  var sizes = new WeakMap();
+  var pending = 0;
+  var dirty = [];
+
+  function redraw(el){
+    /* Hidden (inactive tab) or not laid out yet: flot cannot draw without dimensions, and the
+       drawing would have to be redone on display anyway. */
+    if (!el.clientWidth || !el.clientHeight) return;
+    var plot = jq(el).data('plot');
+    if (!plot) return;
+    try { plot.resize(); plot.setupGrid(); plot.draw(); } catch (e) {}
+  }
+
+  var ro = new ResizeObserver(function(entries){
+    for (var i = 0; i < entries.length; i++) {
+      var el = entries[i].target;
+      var w = el.clientWidth, h = el.clientHeight;
+      var prev = sizes.get(el);
+      /* The redraw only touches the inner canvas, never the holder: no feedback loop. The
+         comparison still skips redraws at unchanged size (0 → 0 when a tab opens, say). */
+      if (prev && prev.w === w && prev.h === h) continue;
+      sizes.set(el, { w: w, h: h });
+      if (dirty.indexOf(el) === -1) dirty.push(el);
+    }
+    if (pending || !dirty.length) return;
+    /* Coalesced into one frame: a resize drag fires dozens of events. */
+    pending = requestAnimationFrame(function(){
+      pending = 0;
+      var todo = dirty; dirty = [];
+      todo.forEach(redraw);
+    });
+  });
+
+  function scan(){
+    var canvases = document.getElementsByTagName('canvas');
+    for (var i = 0; i < canvases.length; i++) {
+      var holder = canvases[i].parentNode;
+      if (!holder || holder.nodeType !== 1 || seen.has(holder)) continue;
+      if (!jq(holder).data('plot')) continue;
+      seen.add(holder);
+      sizes.set(holder, { w: holder.clientWidth, h: holder.clientHeight });
+      ro.observe(holder);
+    }
+  }
+
+  scan();
+  [200, 600, 1500, 3000].forEach(function(ms){ window.setTimeout(scan, ms); });
+  /* A plugin may draw a chart much later (Daily/Monthly/Yearly filter change, tab opening,
+     `refreshWidget`): rescan after every interaction in the page. */
+  document.addEventListener('click', function(){ window.setTimeout(scan, 300); }, true);
+  document.addEventListener('change', function(){ window.setTimeout(scan, 300); }, true);
 })();
 </script>
 <script>
@@ -1550,6 +1787,15 @@ HTML;
             $this->getResponse()->setStatusCode(400);
             return new JsonModel(['success' => false, 'error' => 'Invalid plugin']);
         }
+
+        // Même garde de droits que dashboardPluginPageAction (clé = nom de classe du plugin).
+        try {
+            $rightsSvc = $this->getServiceManager()->get('MelisCoreDashboardPluginsService');
+            if (!$rightsSvc->canAccess($pluginName)) {
+                $this->getResponse()->setStatusCode(403);
+                return new JsonModel(['success' => false, 'error' => 'Forbidden']);
+            }
+        } catch (\Throwable) {}
 
         $render = $this->renderDashboardPlugin($pluginName);
         if ($render === null) {
