@@ -213,6 +213,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             // Add that root for the page editor. FULLY MODULAR: getItem() below returns null when the
             // module is inactive → nothing injected (no phantom load).
             $roots['meliscms_page_analytics_tool_config'] = true;
+            // Same shape for the "Send newsletter" action button (module MelisNewsletter, rendered
+            // only when the page type is NEWSLETTER): it is contributed to the page editor's action
+            // bar via a `forward`, but its scripts live under the plugin root
+            // `melis_newsletter_tool_config` — a name that matches no module, so the forward-by-name
+            // map above cannot resolve it, and the button sits behind the
+            // `type => /meliscms/interface/meliscms_page_actions` link that the type walk only
+            // harvests roots from. Result: melis.newsletter.send.js is never injected, its delegated
+            // `.melis-newsletter-send-btn` handler is never bound, and clicking "Send newsletter"
+            // does nothing at all — no modal, no console error. FULLY MODULAR: getItem() below
+            // returns null when the module is inactive → nothing injected (no phantom load).
+            $roots['melis_newsletter_tool_config'] = true;
         }
 
         // The Orders list's own appsConfig tree (fetched above) only covers the list zone
@@ -1012,6 +1023,20 @@ HTML;
             }
         } catch (\Throwable) {}
 
+        // Couleur d'accent du shell React (rouge « platform » / bleu « studio »), transmise par la
+        // tuile (`widgets.tsx`) : l'iframe est un document séparé, elle n'hérite pas des variables
+        // CSS de l'hôte. FILTRE HEX STRICT obligatoire — la valeur est écrite telle quelle dans une
+        // feuille de style, une chaîne libre serait une injection CSS. Repli : l'ancienne teinte en
+        // dur, pour que la page reste correcte si le param manque (accès direct à l'URL).
+        // Formes acceptées : `rgb()`/`rgba()` (ce que `widgets.tsx` envoie — il résout le token du
+        // thème en couleur calculée) et l'hexadécimal (accès direct à l'URL, mise au point). Un
+        // filtre hex SEUL ne suffisait pas : le minifieur du build React réécrit `#ff0000` en `red`,
+        // le param était donc rejeté et le thème rouge retombait silencieusement sur le repli.
+        $primaryParam  = trim((string) $this->getRequest()->getQuery('primary', ''));
+        $isValidColor  = preg_match('/^#[0-9A-Fa-f]{3,8}$/', $primaryParam)
+            || preg_match('/^rgba?\(\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*(,\s*(0|1|0?\.[0-9]+)\s*)?\)$/', $primaryParam);
+        $pluginPrimary = $isValidColor ? $primaryParam : '#932e2a';
+
         $render = $this->renderDashboardPlugin($pluginName);
 
         if ($render === null) {
@@ -1147,7 +1172,10 @@ HTML;
 {$inlineGlobals}
   </script>
 {$cssLinks}
-  <style>/* !important + padding: le thème legacy (bundle.css, chargé APRÈS ce <style>) pose
+  <style>/* Accent du thème hôte (cf. `?primary=`). En variable pour n'avoir qu'un point à changer,
+       et pour que les règles ci-dessous restent lisibles. */
+    :root { --melis-plugin-primary: {$pluginPrimary}; }
+    /* !important + padding: le thème legacy (bundle.css, chargé APRÈS ce <style>) pose
        `body { padding-top: 47px }` — la réserve pour sa navbar fixe, qui n'existe pas ici. Sans ça
        le contenu du plugin démarre 47px trop bas dans la tuile React (grosse bande vide en haut). */
     body { margin: 0 !important; padding: 0 !important; overflow: auto; }
@@ -1309,10 +1337,20 @@ HTML;
        le canvas naît étroit. On force la rangée du graphe et son porte-graphe à 100%. */
     .row-merge:has(.flotchart-holder) > [class*="col-"] { flex: 1 1 auto; width: 100%; max-width: none; }
     .flotchart-holder { width: 100% !important; }
-    .pros-dash-tbl { width: 100%; margin: 0 !important; border-top: 0 !important; }
-    .pros-dash-tbl thead th { background: #932e2a !important; color: #fff !important; border: 0 !important; font-weight: 600; padding: 8px 12px !important; white-space: nowrap; }
-    .pros-dash-tbl tbody td { padding: 9px 12px !important; border-top: 1px solid #f0f0f0 !important; vertical-align: middle; }
-    .pros-dash-tbl tbody tr:hover td { background: #fafafa; }
+    /* ── Habillage commun des tables de plugin ────────────────────────────────────────────────
+       Même skin pour toutes les tables listées ici : en-tête plein (le `thead.bg-primary` du
+       markup legacy, que Bootstrap 5 aplatit via `--bs-table-bg`), lignes aérées, survol discret.
+       Ajouter une table = ajouter sa classe aux 4 règles ci-dessous, rien d'autre.
+         .pros-dash-tbl                                        derniers prospects (MelisCmsProspects)
+         .melis-commerce-dashboard-plugin-order-numbers-table   dernières commandes (MelisCommerce) */
+    .pros-dash-tbl,
+    .melis-commerce-dashboard-plugin-order-numbers-table { width: 100%; margin: 0 !important; border-top: 0 !important; }
+    .pros-dash-tbl thead th,
+    .melis-commerce-dashboard-plugin-order-numbers-table thead th { background: var(--melis-plugin-primary) !important; color: #fff !important; border: 0 !important; font-weight: 600; padding: 8px 12px !important; white-space: nowrap; }
+    .pros-dash-tbl tbody td,
+    .melis-commerce-dashboard-plugin-order-numbers-table tbody td { padding: 9px 12px !important; border-top: 1px solid #f0f0f0 !important; vertical-align: middle; }
+    .pros-dash-tbl tbody tr:hover td,
+    .melis-commerce-dashboard-plugin-order-numbers-table tbody tr:hover td { background: #fafafa !important; }
     .pros-dash-tbl .pros-dash-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }</style>
 </head>
 <body>
