@@ -929,6 +929,8 @@ HTML;
             $html = $this->renderViewRec($zoneView);
         }
 
+        $html = $this->hoistPluginConfigDatas($html);
+
         $jsCallBacks = array_values(array_unique($jsCallBacks));
 
         // Resources for this plugin. `ressources` is a MODULE-level key: Melis merges the blocks of
@@ -1003,6 +1005,24 @@ HTML;
      *
      * Usage:  GET /melis/react-dashboard-plugin?plugin=CheckWsStatusPlugin
      */
+    /**
+     * Valide une couleur reçue en query param, destinée à être écrite TELLE QUELLE dans une feuille
+     * de style du document iframe — d'où le filtre strict : une chaîne libre serait une injection CSS.
+     *
+     * Formes acceptées : `rgb()`/`rgba()` (ce que `widgets.tsx` envoie — il résout le token du thème
+     * en couleur calculée) et l'hexadécimal (accès direct à l'URL, mise au point). Un filtre hex SEUL
+     * ne suffisait pas : le minifieur du build React réécrit `#ff0000` en `red` (mot-clé CSS), le
+     * param était donc rejeté et le thème rouge retombait silencieusement sur le repli.
+     */
+    private function sanitizeCssColor($value, string $fallback): string
+    {
+        $value = trim((string) $value);
+        $valid = preg_match('/^#[0-9A-Fa-f]{3,8}$/', $value)
+            || preg_match('/^rgba?\(\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*(,\s*(0|1|0?\.[0-9]+)\s*)?\)$/', $value);
+
+        return $valid ? $value : $fallback;
+    }
+
     public function dashboardPluginPageAction()
     {
         $pluginName = $this->getRequest()->getQuery('plugin', '');
@@ -1023,6 +1043,17 @@ HTML;
             }
         } catch (\Throwable) {}
 
+        // ⚠️ PERF — free the PHP session lock BEFORE the (~1s+) plugin render below. The React
+        // dashboard opens ONE iframe per widget (≈9 at once), and every same-cookie request blocks
+        // on the single PHP session file lock: without this release the widget renders SERIALISE
+        // (one plugin at a time → ~10s+ total) AND stall the dashboard's other requests (the layout
+        // POST, stats, thumbnails…) behind them. This is a display-only render — the rights check
+        // above already read the session, and nothing below writes it — so closing the session for
+        // writing here is safe and lets the renders run concurrently (up to the php-fpm/CPU ceiling).
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            @session_write_close();
+        }
+
         // Couleur d'accent du shell React (rouge « platform » / bleu « studio »), transmise par la
         // tuile (`widgets.tsx`) : l'iframe est un document séparé, elle n'hérite pas des variables
         // CSS de l'hôte. FILTRE HEX STRICT obligatoire — la valeur est écrite telle quelle dans une
@@ -1032,10 +1063,23 @@ HTML;
         // thème en couleur calculée) et l'hexadécimal (accès direct à l'URL, mise au point). Un
         // filtre hex SEUL ne suffisait pas : le minifieur du build React réécrit `#ff0000` en `red`,
         // le param était donc rejeté et le thème rouge retombait silencieusement sur le repli.
-        $primaryParam  = trim((string) $this->getRequest()->getQuery('primary', ''));
-        $isValidColor  = preg_match('/^#[0-9A-Fa-f]{3,8}$/', $primaryParam)
-            || preg_match('/^rgba?\(\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*(,\s*(0|1|0?\.[0-9]+)\s*)?\)$/', $primaryParam);
-        $pluginPrimary = $isValidColor ? $primaryParam : '#932e2a';
+        $pluginPrimary = $this->sanitizeCssColor($this->getRequest()->getQuery('primary', ''), '#932e2a');
+
+        // Mode sombre : le HTML legacy code en dur des surfaces blanches et des textes sombres, la
+        // seule couleur d'accent ne suffit donc pas à le faire suivre le thème. La tuile envoie en
+        // plus `scheme` + les tokens de surface de l'hôte (mêmes filtres que `primary`). Les replis
+        // sont les valeurs CLAIRES : un accès direct à l'URL, sans params, doit rendre la page telle
+        // qu'avant. La liste blanche sur `scheme` est ce qui garantit que le bloc de surcharges
+        // sombres ne peut pas être activé par une valeur inattendue.
+        $pluginScheme = $this->getRequest()->getQuery('scheme', '') === 'dark' ? 'dark' : 'light';
+        $pluginBg     = $this->sanitizeCssColor($this->getRequest()->getQuery('bg', ''), '#ffffff');
+        $pluginFg     = $this->sanitizeCssColor($this->getRequest()->getQuery('fg', ''), '#333333');
+        $pluginBorder = $this->sanitizeCssColor($this->getRequest()->getQuery('border', ''), '#f0f0f0');
+        $pluginMuted  = $this->sanitizeCssColor($this->getRequest()->getQuery('muted', ''), '#888888');
+        // Survol de ligne : pas un token de l'hôte (il n'en expose pas d'équivalent), donc dérivé du
+        // mode. Un voile translucide en sombre — il se pose sur la couleur réelle du fond, quelle
+        // qu'elle soit, là où une teinte opaque figerait une nuance.
+        $pluginRowHover = $pluginScheme === 'dark' ? 'rgba(255,255,255,0.06)' : '#fafafa';
 
         $render = $this->renderDashboardPlugin($pluginName);
 
@@ -1103,9 +1147,586 @@ HTML;
             }
         }
 
+        // ── Graphiques flot en mode sombre ────────────────────────────────────────────────────────
+        // AUCUNE règle CSS ne peut repeindre le fond d'un graphique flot : il est PEINT DANS LE
+        // CANVAS (les plugins codent en dur `grid.backgroundColor = { colors: ["#fff","#fff"] }`).
+        // On enveloppe donc `$.plot` pour neutraliser ce fond et réaligner grille et bordures sur les
+        // tokens de l'hôte — le fond de la tuile React transparaît alors sous le graphique.
+        // Émis APRÈS les scripts du plugin (qui définissent `$.plot`) et AVANT les callbacks (qui
+        // l'appellent). Le patch survit aux rechargements internes : `refreshWidget` réévalue les
+        // callbacks, mais `$.plot` reste enveloppé.
+        $flotPatch = $pluginScheme !== 'dark' ? '' : <<<'JS'
+<script>
+(function(){
+  var jq = window.jQuery;
+  if (!jq || !jq.plot) return;
+  var original = jq.plot;
+  var css = getComputedStyle(document.documentElement);
+  var border = (css.getPropertyValue('--melis-plugin-border') || '').trim() || '#3f3f46';
+  var patched = function(placeholder, data, options){
+    var opts = options || {};
+    opts = jq.extend({}, opts, { grid: jq.extend({}, opts.grid || {}, {
+      backgroundColor: null, /* ← le fond blanc peint dans le canvas */
+      color: border,
+      borderColor: 'transparent',
+      tickColor: border
+    })});
+    return original.call(this, placeholder, data, opts);
+  };
+  /* flot accroche des propriétés sur $.plot (notamment $.plot.plugins) — les conserver. */
+  jq.extend(patched, original);
+  jq.plot = patched;
+})();
+</script>
+JS;
+
+        // ── MelisCommerceDashboardPluginOrderMessages : clic sur les filtres All / Unanswered ─────
+        // Bug du plugin legacy (NE PAS corriger dans melis-commerce : chantier 3 = isolé) : les radios
+        // du filtre et les lignes de message portent la MÊME classe `commerce-dashboard-plugin-order-messages`
+        // (view/dashboard-plugins/commerce-dashboard-plugin-order-messages.phtml:7 vs le `messageHtml`
+        // construit dans le JS du plugin). Le handler `click` délégué sur `body` ne discrimine pas :
+        // cliquer sur All / Unanswered appelle `openOrderMessages(<input radio>)`, où
+        // `$(radio).find('.order-message-id')` est vide → `orderId === undefined` → les sélecteurs
+        // dérivés matchent n'importe quoi et le code casse sur `specificOrderTab[0].trigger("click")`
+        // (`[0]` est un élément DOM natif, `.trigger` est une méthode jQuery → TypeError).
+        // On intercepte donc le clic en phase de CAPTURE, avant que jQuery ne le voie sur `body`, et on
+        // l'arrête quand la cible n'est pas une ligne de message. `stopPropagation` n'empêche NI la
+        // sélection du radio NI l'événement `change` (qui bubble séparément) : le filtre continue de
+        // fonctionner, seul l'appel parasite à `openOrderMessages` disparaît.
+        $orderMessagesPatch = $pluginName !== 'MelisCommerceDashboardPluginOrderMessages' ? '' : <<<'JS'
+<script>
+(function(){
+  document.addEventListener('click', function(e){
+    var el = e.target && e.target.closest ? e.target.closest('.commerce-dashboard-plugin-order-messages') : null;
+    if (!el) return;
+    /* Seules les lignes de message (`<a class="list-group-item …">`) ouvrent une commande. */
+    if (el.classList.contains('list-group-item')) return;
+    e.stopPropagation();
+  }, true);
+})();
+</script>
+JS;
+
+        // ── Surcharges du mode sombre ─────────────────────────────────────────────────────────────
+        // Le HTML legacy est écrit pour un thème CLAIR : surfaces blanches (`.bg-white`,
+        // `.widget-body`) et textes sombres codés en dur. On les remplace par les tokens de l'hôte
+        // pour que le contenu du plugin suive le thème. Émis en DERNIER dans le <style> — à
+        // spécificité égale, la dernière règle gagne.
+        $darkCss = $pluginScheme !== 'dark' ? '' : <<<CSS
+    /* ── Mode sombre (cf. `?scheme=dark`) ─────────────────────────────────────────────────── */
+    /* Le fond du DOCUMENT iframe lui-même : la feuille legacy (bundle.css, chargée après) peint le
+       body en BLANC. Sans le repeindre, les surfaces de widget passées en `transparent` ci-dessous
+       laissent transparaître ce body blanc → la tuile reste claire (le vrai symptôme observé). On le
+       met à la couleur de carte de l'hôte pour que le plugin repose sur un fond sombre cohérent. */
+    html, body { background: var(--melis-plugin-bg) !important; }
+    body, #{$zoneId} { color: var(--melis-plugin-fg); }
+
+    /* ── Surfaces neutres → transparentes ─────────────────────────────────────────────────────
+       Tous les conteneurs « blancs » du legacy : ils reposent alors sur le fond sombre du body.
+       On NE touche PAS aux surfaces SÉMANTIQUES (`.bg-primary`, `.bg-info`, `.bg-success`,
+       `.bg-inverse` — les tuiles colorées de « Page indicators » à texte blanc, lisibles telles
+       quelles ; `thead.bg-primary` — l'en-tête d'accent des tables). */
+    #{$zoneId} .bg-white,
+    #{$zoneId} .widget,
+    #{$zoneId} .widget-inverse,
+    #{$zoneId} .widget-body,
+    #{$zoneId} .widget-body-white,
+    #{$zoneId} .widget-heading-simple,
+    #{$zoneId} .widget-head,
+    #{$zoneId} .innerAll,
+    #{$zoneId} .panel,
+    #{$zoneId} .tab-content,
+    #{$zoneId} .col-app,
+    #{$zoneId} .col-table-row,
+    #{$zoneId} .list-group,
+    #{$zoneId} .list-group-item,
+    #{$zoneId} table { background: transparent !important; color: var(--melis-plugin-fg) !important; }
+
+    /* ── « Page indicators » (MelisCms) : tuiles colorées, version sombre ──────────────────────
+       Les 4 tuiles combinent `.innerAll` (repassé transparent juste au-dessus) AVEC une classe
+       sémantique `.bg-*`. Comme `#{$zoneId} .innerAll` (id+1 classe) l'emporte sur le `.bg-*`
+       simple de bundle.css, la couleur legacy disparaît → tuiles plates et ternes en sombre.
+       On la RÉTABLIT ici, mais calibrée pour le fond sombre : teinte translucide + bordure
+       assortie + icône d'accent (au lieu des aplats vifs #932e2a/#466baf/#72af46 qui « bavent »
+       en dark). Spécificité id+2 classes → gagne sur la règle `.innerAll` transparente. */
+    #{$zoneId} .cms-page-indicators-plugin .innerAll { border-radius: 8px; }
+    #{$zoneId} .cms-page-indicators-plugin .bg-inverse { background: rgba(148,163,184,0.12) !important; border: 1px solid rgba(148,163,184,0.30) !important; }
+    #{$zoneId} .cms-page-indicators-plugin .bg-info    { background: rgba(59,130,246,0.14) !important; border: 1px solid rgba(59,130,246,0.35) !important; }
+    #{$zoneId} .cms-page-indicators-plugin .bg-success { background: rgba(34,197,94,0.14) !important; border: 1px solid rgba(34,197,94,0.35) !important; }
+    #{$zoneId} .cms-page-indicators-plugin .bg-primary { background: rgba(239,68,68,0.14) !important; border: 1px solid rgba(239,68,68,0.35) !important; }
+    /* Icônes teintées à la couleur d'accent de chaque tuile ; le texte reste clair (lisibilité). */
+    #{$zoneId} .cms-page-indicators-plugin .bg-inverse i { color: #cbd5e1 !important; }
+    #{$zoneId} .cms-page-indicators-plugin .bg-info i    { color: #60a5fa !important; }
+    #{$zoneId} .cms-page-indicators-plugin .bg-success i { color: #4ade80 !important; }
+    #{$zoneId} .cms-page-indicators-plugin .bg-primary i { color: #f87171 !important; }
+
+    /* ── Textes ───────────────────────────────────────────────────────────────────────────────
+       Titres / auteurs codés en couleur sombre dans le legacy. On NE force PAS `p`/`span`/`td`
+       en bloc : cela écraserait les couleurs d'accent voulues (`.text-primary`, `.ra-username`,
+       statuts de commande…). L'héritage depuis `#{$zoneId}` suffit pour le texte courant. */
+    #{$zoneId} h1, #{$zoneId} h2, #{$zoneId} h3, #{$zoneId} h4, #{$zoneId} h5, #{$zoneId} h6,
+    #{$zoneId} .author { color: var(--melis-plugin-fg) !important; }
+    #{$zoneId} .text-muted, #{$zoneId} .muted, #{$zoneId} h4.muted,
+    #{$zoneId} .type, #{$zoneId} .time { color: var(--melis-plugin-muted) !important; }
+
+    /* ── Bordures ─────────────────────────────────────────────────────────────────────────── */
+    #{$zoneId} .separator,
+    #{$zoneId} hr,
+    #{$zoneId} .border-bottom,
+    #{$zoneId} .border-top,
+    #{$zoneId} .border-left,
+    #{$zoneId} .border-right,
+    #{$zoneId} .widget-head,
+    #{$zoneId} .list-group-item { border-color: var(--melis-plugin-border) !important; }
+
+    /* ── Boutons (filtres Daily/Monthly/… en `.btn-default`) ──────────────────────────────────
+       État actif : `.active`/`.focus` (orders-number & sales-revenue) et
+       `.btn-check:checked + .btn-default` (prospects) → couleur d'accent du thème. */
+    #{$zoneId} .btn-default { background: transparent !important; border-color: var(--melis-plugin-border) !important; color: var(--melis-plugin-fg) !important; }
+    #{$zoneId} .btn-default.active,
+    #{$zoneId} .btn-default.focus,
+    #{$zoneId} .btn-check:checked + .btn-default { background: var(--melis-plugin-primary) !important; border-color: var(--melis-plugin-primary) !important; color: #fff !important; }
+
+    /* ── Onglets (prospects, workflow) ────────────────────────────────────────────────────────
+       Barre `.nav-tabs` : bordure et libellés atténués ; l'onglet actif reprend l'accent.
+       (Le module SmallBusiness colore lui-même l'onglet actif du workflow en vert — laissé tel.) */
+    #{$zoneId} .nav-tabs { border-color: var(--melis-plugin-border) !important; }
+    #{$zoneId} .nav-tabs .nav-link { color: var(--melis-plugin-muted) !important; background: transparent !important; border-color: transparent !important; }
+    /* Onglet actif : Bootstrap lui pose un fond BLANC — c'est la « boîte blanche » du sous-onglet
+       PAGE du workflow. On le repeint en surface sombre + soulignement d'accent. On vise les DEUX
+       conventions de classe active : `.nav-link.active` (BS4/5, classe sur le `<a>`) ET
+       `li.active > a` (BS3, classe sur le `<li>` — cas des onglets glyphicons du workflow, sinon la
+       règle ne matchait pas et la boîte restait blanche). */
+    #{$zoneId} .nav-tabs .nav-link.active,
+    #{$zoneId} .nav-tabs .nav-item.active > a,
+    #{$zoneId} .nav-tabs > li.active > a { color: var(--melis-plugin-fg) !important; background: var(--melis-plugin-row-hover) !important; border-color: var(--melis-plugin-border) var(--melis-plugin-border) var(--melis-plugin-primary) !important; }
+    /* Onglets à icône « glyphicons » (police, donc couleur pilotable en CSS) : icône atténuée au
+       repos, accent quand l'onglet est actif. Le rouge Melis (#e61c23) du legacy est ainsi remplacé. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons i:before { color: var(--melis-plugin-muted) !important; }
+    /* Actif : Bootstrap 5 déplace `.active` du `<li>` vers le `<a>` (`.nav-link.active`) à l'exécution
+       — on vise donc les DEUX formes (`li.active > a.glyphicons` ET `a.glyphicons.active`), sinon la
+       règle « au repos » ci-dessus (plus spécifique que la générique) l'emporterait et le texte
+       resterait gris. */
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a.glyphicons i:before,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons.active i:before,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons:hover i:before { color: var(--melis-plugin-primary) !important; }
+    /* Le glyphe « file » de Glyphicons (\\E037) dessine sa PAGE en BLANC dans la police elle-même —
+       aucun CSS ne peut recolorer une portion d'un glyphe, et son fond `<i>` est bien transparent
+       (confirmé au DevTools). On abandonne donc la police : on VIDE le glyphe (`content:""`) et on
+       redessine l'icône via un SVG en `mask` — la forme vient du SVG, la COULEUR de `background-color`
+       (l'accent du thème). Résultat : icône document propre, monochrome, qui suit le thème, sans aucun
+       blanc possible (un masque n'a pas de couleur propre). Vaut pour tous les onglets `workflow-type`. */
+    #{$zoneId} .widget-tabs .nav-tabs a.glyphicons.workflow-type > i { display: inline-block !important; width: auto !important; height: auto !important; line-height: 1 !important; vertical-align: middle !important; background: transparent !important; }
+    #{$zoneId} .widget-tabs .nav-tabs a.glyphicons.workflow-type > i:before {
+      content: "" !important;
+      display: inline-block !important;
+      width: 15px !important;
+      height: 15px !important;
+      margin-right: 6px !important;
+      vertical-align: -3px !important;
+      background-color: var(--melis-plugin-primary) !important;
+      color: transparent !important;
+      -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/%3E%3Cpolyline points='14 2 14 8 20 8'/%3E%3C/svg%3E");
+      mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/%3E%3Cpolyline points='14 2 14 8 20 8'/%3E%3C/svg%3E");
+      -webkit-mask-repeat: no-repeat !important; mask-repeat: no-repeat !important;
+      -webkit-mask-position: center !important; mask-position: center !important;
+      -webkit-mask-size: contain !important; mask-size: contain !important;
+    }
+    /* Le LIBELLÉ de l'onglet (« PAGE ») : atténué au repos, clair quand l'onglet est actif. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons { color: var(--melis-plugin-muted) !important; }
+    #{$zoneId} .widget.widget-tabs > .widget-head ul li.active a.glyphicons,
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a.glyphicons,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons.active { color: var(--melis-plugin-fg) !important; }
+    /* La « BOÎTE BLANCHE » de l'onglet : le thème pose un fond blanc sur ces onglets glyphicons
+       (`…a.glyphicons:hover{background:#fff}` + fond de base du variant `widget-tabs-icons-only-2`).
+       On force le fond TRANSPARENT dans TOUS les états (repos / actif que `.active` soit sur le `<li>`
+       ou sur le `<a>` / survol) : l'onglet se fond dans l'en-tête sombre, l'état actif se lit à
+       l'icône + libellé clairs et au soulignement d'accent (règle générique `.nav-link.active`). */
+    #{$zoneId} .widget.widget-tabs-icons-only-2 > .widget-head ul li a.glyphicons,
+    #{$zoneId} .widget.widget-tabs-icons-only-2 > .widget-head ul li.active a.glyphicons,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons:hover,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons.active,
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a.glyphicons,
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a.glyphicons:hover { background: transparent !important; }
+    /* Filet de sécurité : la « boîte blanche » persiste car elle n'est PAS portée par le fond du
+       `<a>` (déjà neutralisé ci-dessus) mais par un élément FRÈRE — le `<li>`, le `<i>` vide, ou une
+       bordure/ombre claire du variant. On neutralise donc TOUT le sous-arbre de l'onglet interne
+       (conteneur `.dashboard-workflow-tabs`) : fond transparent, ombre supprimée, bordure au ton du
+       thème. Sélecteur très spécifique + id → l'emporte sur tout le legacy. */
+    #{$zoneId} .dashboard-workflow-tabs > .widget-head .nav-tabs li,
+    #{$zoneId} .dashboard-workflow-tabs > .widget-head .nav-tabs li.active,
+    #{$zoneId} .dashboard-workflow-tabs > .widget-head .nav-tabs li > a,
+    #{$zoneId} .dashboard-workflow-tabs > .widget-head .nav-tabs li.active > a,
+    #{$zoneId} .dashboard-workflow-tabs > .widget-head .nav-tabs li > a.active,
+    #{$zoneId} .dashboard-workflow-tabs > .widget-head .nav-tabs li > a > i { background: transparent !important; box-shadow: none !important; border-color: var(--melis-plugin-border) !important; }
+    /* LA « boîte » claire de l'icône : `.glyphicons i { background:#e5e5e5 }` (bundle.css) pose un
+       carré gris clair derrière le `<i>` vide de TOUT élément `.glyphicons` — c'est le fond blanc vu
+       autour de l'icône de l'onglet PAGE. On le rend transparent directement à la source. */
+    #{$zoneId} a.glyphicons > i,
+    #{$zoneId} .glyphicons > i { background: transparent !important; box-shadow: none !important; }
+    /* Exhaustif : la « paperasse » claire vue dans l'icône du fichier est l'espace négatif du glyphe
+       laissant voir un fond clair. On neutralise TOUT fond (couleur ET image/sprite) et toute ombre
+       sur l'onglet interne, son `<a>`, le `<i>` et ses deux pseudo-éléments — quel que soit l'élément
+       fautif, il est couvert. NB : si le blanc PERSISTE après ça, c'est un style INLINE posé par JS
+       (le HTML serveur a un `<i></i>` propre) → seule l'inspection DevTools le révélera. */
+    #{$zoneId} .dashboard-workflow-tabs .nav-tabs li,
+    #{$zoneId} .dashboard-workflow-tabs .nav-tabs li > a,
+    #{$zoneId} .dashboard-workflow-tabs .nav-tabs li > a > i,
+    #{$zoneId} .dashboard-workflow-tabs .nav-tabs li > a > i:before,
+    #{$zoneId} .dashboard-workflow-tabs .nav-tabs li > a > i:after { background: transparent !important; background-color: transparent !important; background-image: none !important; box-shadow: none !important; }
+
+    /* ── Survol de ligne des listes/tables ────────────────────────────────────────────────────
+       Le plugin « orders-number » injecte SON PROPRE `<style>` (dans le body, donc APRÈS ce bloc)
+       qui code `background-color:#f5f5f5` en clair sur `…orders-number-item:hover`. Notre règle est
+       postérieure en cascade ? Non — la sienne l'est. On la bat donc avec `!important`. */
+    #{$zoneId} .melis-commerce-dashboard-plugin-orders-number-item:hover,
+    #{$zoneId} .melis-commerce-dashboard-plugin-orders-number-item:hover td,
+    #{$zoneId} .list-group-item:hover { background: var(--melis-plugin-row-hover) !important; }
+    /* Plugin « Recent page activity » (MelisCmsPageHistoric) : bundle.css peint la ligne survolée /
+       `.highlight` (classe posée en JS) en gris CLAIR `#f2f2f2` → en sombre la ligne devient claire
+       alors que le texte reste clair → illisible. On la repeint en surface de survol sombre du thème
+       (le texte, hérité de `#{$zoneId}`, redevient lisible). */
+    #{$zoneId} .widget-activity ul.list li:hover,
+    #{$zoneId} .widget-activity ul.list li.highlight { background: var(--melis-plugin-row-hover) !important; }
+
+    /* ── Encart neutre d'annonce (`.alert-gray`) ──────────────────────────────────────────────
+       Neutre → surface discrète. Les alertes SÉMANTIQUES (`.alert-warning/-success/-danger/-info`,
+       ex. « pas de données ») gardent leur couleur : elles portent une information. */
+    #{$zoneId} .alert-gray { background: var(--melis-plugin-row-hover) !important; border-color: var(--melis-plugin-border) !important; color: var(--melis-plugin-fg) !important; }
+
+    /* ── Frise chronologique (plugin Annonces) ────────────────────────────────────────────────
+       Le rail vertical et les pastilles sont peints via des bordures claires (`.timeline` en
+       ::before/::after). On les réaligne sur la bordure du thème. */
+    #{$zoneId} .timeline:before,
+    #{$zoneId} .timeline > li:before,
+    #{$zoneId} .timeline > li:after { border-color: var(--melis-plugin-border) !important; background-color: var(--melis-plugin-bg) !important; }
+    /* Variante `.layout-timeline` (plugin Annonces) : la ligne verticale active, ses pastilles et
+       ses tirets de raccord sont codés en dur en ROUGE (#cb4040, module.admin.page.timelines.css).
+       En sombre on les repasse à l'accent du thème (bleu Studio). Préfixé `.layout-timeline` →
+       spécificité supérieure à la règle générique ci-dessus, il l'emporte. */
+    #{$zoneId} .layout-timeline ul.timeline > li.active:before,
+    #{$zoneId} .layout-timeline ul.timeline > li.active .type:before,
+    #{$zoneId} .layout-timeline ul.timeline > li.active .type:after { background: var(--melis-plugin-primary) !important; background-color: var(--melis-plugin-primary) !important; border-color: var(--melis-plugin-primary) !important; }
+    #{$zoneId} .layout-timeline ul.timeline > li.active .type,
+    #{$zoneId} .layout-timeline ul.timeline > li.active .type i:before { color: var(--melis-plugin-primary) !important; }
+    /* Pagination (BS `.pagination`) : page active peinte en ROUGE Melis, liens en rouge. En sombre
+       → accent du thème (bleu Studio). `#{$zoneId}` (id) l'emporte sur les règles bundle (classes). */
+    #{$zoneId} .pagination .page-item.active .page-link,
+    #{$zoneId} .pagination .page-item.active > a { background-color: var(--melis-plugin-primary) !important; border-color: var(--melis-plugin-primary) !important; color: #fff !important; }
+    #{$zoneId} .pagination .page-link { color: var(--melis-plugin-primary) !important; background-color: transparent !important; border-color: var(--melis-plugin-border) !important; }
+    #{$zoneId} .pagination .page-item.disabled .page-link { color: var(--melis-plugin-muted) !important; }
+
+    /* ── Workflow (MelisSmallBusiness) ────────────────────────────────────────────────────────
+       Le module dessine ses onglets HAUTS (« Users' demands » / « My demands ») en pastilles
+       PLEINES : gris `#ECEBEB` inactif, `#72af46` vert actif (style.css), et le thème legacy colore
+       le libellé actif en rouge Melis. On aligne sur le reste : inactif = texte atténué transparent
+       (déjà via `.nav-link`), actif = pastille d'accent à texte blanc. `#{$zoneId}` (id) l'emporte
+       sur les sélecteurs du module (classes seules). */
+    #{$zoneId} .dashboard-workflow-container .nav-tabs > li.active > a,
+    #{$zoneId} .dashboard-workflow-container .nav-tabs .nav-item.active > a,
+    #{$zoneId} .dashboard-workflow-container .nav-tabs .nav-link.active { background: var(--melis-plugin-primary) !important; border-color: var(--melis-plugin-primary) !important; color: #fff !important; }
+    #{$zoneId} .dashboard-workflow-container .nav-tabs .nav-item.active > a .a-text,
+    #{$zoneId} .dashboard-workflow-container .nav-tabs .nav-item.active > a i,
+    #{$zoneId} .dashboard-workflow-container .nav-tabs > li.active > a .a-text,
+    #{$zoneId} .dashboard-workflow-container .nav-tabs > li.active > a i { color: #fff !important; }
+    /* Petits fonds gris `#ECEBEB` internes (badge de compte, boutons d'action au survol). */
+    #{$zoneId} .wd-cont span span,
+    #{$zoneId} .wd-btn-cont span { background: var(--melis-plugin-row-hover) !important; color: var(--melis-plugin-fg) !important; }
+    /* Pastilles d'état VALIDATED / REFUSED : on garde le vert / rouge (l'information de statut), mais
+       en tons LÉGÈREMENT DÉSATURÉS pour ne pas éblouir sur fond sombre (le vert #72af46 / rouge
+       #cb4040 vifs du legacy « bavent » en dark). Couvre les deux emplacements : la pastille de la
+       ligne (`.wd-action-*`) et les boutons d'action au survol (`.wd-validate`/`.wd-refuse`). */
+    #{$zoneId} .wd-action-validate,
+    #{$zoneId} .wd-btn-cont .wd-validate,
+    #{$zoneId} .d-workflow-action-cont .wd-action-validate { background: rgba(52,168,95,0.18) !important; color: #4ade80 !important; border: 1px solid rgba(52,168,95,0.55) !important; }
+    #{$zoneId} .wd-action-refuse,
+    #{$zoneId} .wd-btn-cont .wd-refuse,
+    #{$zoneId} .d-workflow-action-cont .wd-action-refuse { background: rgba(220,68,68,0.18) !important; color: #f87171 !important; border: 1px solid rgba(220,68,68,0.55) !important; }
+    /* Tooltip legacy (bulle « PAGE » au survol d'un onglet) : le thème clair la rend blanche. On la
+       repeint sombre. NON scopée à l'id : la bulle est ajoutée au `<body>`, hors du wrapper de zone. */
+    .tooltip-inner, .workflow-type-tooltip { background: #212121 !important; background-color: #212121 !important; color: #fff !important; border-color: #212121 !important; }
+
+    /* ── Calendrier (datepicker du plugin Calendar) ───────────────────────────────────────────
+       Le legacy peint en ROUGE Melis (#932e2a) l'en-tête des jours (`thead th.dow`, réglé dans
+       bundle.css) et la sélection ; le module ajoute #e64444 (jours à événement) et #e61c23 (jour
+       actif à événement). En sombre on les repeint à l'accent du thème (bleu Studio). Chaque
+       sélecteur est préfixé par `#{$zoneId}` (un id) → il l'emporte sur les règles bundle (classes
+       seules), même sur leurs `!important`. Ne matche QUE la tuile Calendar (ces éléments n'existent
+       pas ailleurs) — inutile de conditionner au plugin. Le jaune « aujourd'hui » est laissé tel. */
+    #{$zoneId} .datepicker thead th.dow { background: var(--melis-plugin-primary) !important; color: #fff !important; }
+    #{$zoneId} .datepicker table tr td.active:hover,
+    #{$zoneId} .datepicker table tr td span.active:hover,
+    #{$zoneId} .datepicker table tr td.day.calendar-highlight,
+    #{$zoneId} .calendar-highlight,
+    #{$zoneId} .calendar-highlight:hover { background-color: var(--melis-plugin-primary) !important; color: #fff !important; }
+    /* Jour actif PORTANT un événement : accent légèrement assombri pour rester distinct du jour à
+       simple événement. */
+    #{$zoneId} .datepicker table tr td.active.day.calendar-highlight.calendar-event { background-color: var(--melis-plugin-primary) !important; filter: brightness(0.82); }
+
+    /* ── Activité récente des pages (plugin MelisCmsPageHistoric) ─────────────────────────────
+       Les noms de page et d'utilisateur (`.ra-username`) sont codés en ROUGE Melis (#e61c23) dans
+       styles.css. On NE les touche PAS en clair (accent voulu), mais en sombre on les réaligne sur
+       l'accent du thème (bleu Studio) pour la cohérence avec le reste des tuiles. `#{$zoneId}` (id)
+       l'emporte sur le sélecteur de classe seule du legacy. */
+    #{$zoneId} .ra-username { color: var(--melis-plugin-primary) !important; }
+
+    /* ── Graphique flot ───────────────────────────────────────────────────────────────────────
+       Libellés d'axes / légende : flot pose leur couleur en style INLINE → !important obligatoire. */
+    #{$zoneId} .flot-text,
+    #{$zoneId} .flot-tick-label,
+    #{$zoneId} .legend table,
+    #{$zoneId} .legend .legendLabel { color: var(--melis-plugin-muted) !important; background: transparent !important; }
+    /* Cadre de la boîte de légende : en clair, deux sources posent une « puce » habillée qui reste
+       allumée en sombre et donne un encart gris/blanc écrasé (cf. section entourée) :
+         • Prospects  → liseré `#e5e5e5` sur `.legend table` (`.cms-pros-dash-chart-line-graph …`) ;
+         • orders-number → skin charts (`module.admin.page.charts`) qui habille les CELLULES
+           (`.legend table tr td { background:#f9f9f9; border:1px solid #e5e5e5 }` + coins arrondis
+           sur first/last-of-type).
+       On unifie les deux : une seule pilule au liseré du thème sur `.legend table` (coins arrondis,
+       cellules aérées) et on efface fond + bordure des cellules pour ne pas doubler le cadre ni
+       laisser transparaître le gris clair. `#{$zoneId}` (id) l'emporte sur les sélecteurs de classe
+       (même avec !important) des deux feuilles. */
+    #{$zoneId} .legend table { border: 1px solid var(--melis-plugin-border) !important; border-radius: 6px !important; border-collapse: separate !important; }
+    #{$zoneId} .legend table tr td { background: transparent !important; border: none !important; }
+    #{$zoneId} .legend .legendColorBox { padding: 2px 3px 2px 6px !important; }
+    #{$zoneId} .legend .legendLabel { padding: 2px 8px 2px 3px !important; white-space: nowrap !important; }
+    /* Liseré clair (inline) du cadre des pastilles de légende. Ne viser que le cadre EXTÉRIEUR
+       (`> div`) : la pastille intérieure exprime la couleur de la série via sa PROPRE bordure —
+       la repeindre éteindrait les couleurs du graphique. */
+    #{$zoneId} .legend .legendColorBox > div { border-color: var(--melis-plugin-border) !important; }
+CSS;
+
+        // ── Pop-up de confirmation « Valider / Refuser » (plugin Workflow) — habillage React ──────
+        // Clic sur l'icône valider/refuser d'une demande → workflow.js appelle `melisCoreTool.confirm()`,
+        // qui ouvre un BootstrapDialog `TYPE_WARNING` : bandeau orange, coins carrés, boutons rouge/vert
+        // — l'esthétique du BO legacy. Dans la tuile React on le repeint aux tokens du shell : carte
+        // arrondie, en-tête neutre, message discret, bouton « Non » sobre (contour) + « Oui » en couleur
+        // de thème. Corrigé ICI (page iframe du dashboard React) et PAS dans melisCoreTool.js/workflow.js,
+        // que le BO classique partage → chantier 3 isolé, le legacy n'est pas touché.
+        // Tout est en `!important` (les feuilles bootstrap3-dialog sont chargées APRÈS ce <style>, cf.
+        // `$cssLinks`) et strictement sous `.confirm-modal-header` — la `cssClass` que `confirm()` pose
+        // sur la modale (melisCoreTool.js) — pour ne jamais toucher les AUTRES modales de cette page
+        // (ex. la modale de commentaire ouverte juste après une validation). Gaté au seul plugin Workflow.
+        $workflowDialogCss = $pluginName !== 'MelisSBWorkflowPlugin' ? '' : <<<'CSS'
+    .confirm-modal-header .modal-content {
+      border: 1px solid var(--melis-plugin-border) !important;
+      border-radius: 14px !important;
+      overflow: hidden !important;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .28) !important;
+      background: var(--melis-plugin-bg) !important;
+      color: var(--melis-plugin-fg) !important;
+    }
+    /* En-tête : on neutralise le bandeau orange (`type-warning`) → surface neutre + filet. */
+    .confirm-modal-header .modal-header {
+      background: var(--melis-plugin-bg) !important;
+      color: var(--melis-plugin-fg) !important;
+      border-bottom: 1px solid var(--melis-plugin-border) !important;
+      border-radius: 0 !important;
+      padding: 18px 22px 14px !important;
+    }
+    .confirm-modal-header .modal-header .bootstrap-dialog-title {
+      color: var(--melis-plugin-fg) !important;
+      font-size: 16px !important;
+      font-weight: 600 !important;
+      line-height: 1.3 !important;
+    }
+    .confirm-modal-header .bootstrap-dialog-close-button {
+      color: var(--melis-plugin-fg) !important;
+      opacity: .55;
+      text-shadow: none !important;
+      font-size: 20px !important;
+    }
+    .confirm-modal-header .bootstrap-dialog-close-button:hover { opacity: 1; }
+    .confirm-modal-header .modal-body {
+      padding: 18px 22px 6px !important;
+      color: var(--melis-plugin-muted) !important;
+      font-size: 14px !important;
+      line-height: 1.5 !important;
+    }
+    .confirm-modal-header .modal-footer {
+      border-top: 0 !important;
+      padding: 12px 22px 20px !important;
+      display: flex !important;
+      justify-content: flex-end !important;
+      gap: 10px !important;
+    }
+    .confirm-modal-header .modal-footer .btn {
+      float: none !important;
+      margin: 0 !important;
+      min-width: 96px !important;
+      border-radius: 9px !important;
+      padding: 9px 18px !important;
+      font-size: 14px !important;
+      font-weight: 500 !important;
+      box-shadow: none !important;
+      transition: filter .15s ease, background .15s ease !important;
+    }
+    /* « Non » : bouton sobre (contour) — c'est une annulation, pas une action destructrice. `order`
+       verrouille sa place à gauche quel que soit le `pull-left`/`float` que le legacy lui remet. */
+    .confirm-modal-header .modal-footer .btn-danger {
+      order: 1;
+      background: var(--melis-plugin-bg) !important;
+      border: 1px solid var(--melis-plugin-border) !important;
+      color: var(--melis-plugin-fg) !important;
+    }
+    .confirm-modal-header .modal-footer .btn-danger:hover { background: var(--melis-plugin-row-hover) !important; }
+    /* « Oui » : bouton primaire en couleur de thème. */
+    .confirm-modal-header .modal-footer .btn-success {
+      order: 2;
+      background: var(--melis-plugin-primary) !important;
+      border: 1px solid var(--melis-plugin-primary) !important;
+      color: #fff !important;
+    }
+    .confirm-modal-header .modal-footer .btn-success:hover { filter: brightness(1.08); }
+
+    /* ── Modale « Ajouter un commentaire » (ouverte après une validation / un refus) ─────────────
+       melisHelper.createModal ouvre ensuite cette modale (workflow-comment-modal) : le legacy
+       l'affiche avec un bandeau ROUGE « Add comment », des coins carrés et des boutons rouge/vert.
+       Même habillage React que la pop-up de confirmation, aux tokens du shell. Portée : le conteneur
+       DÉDIÉ de cette modale (id déterministe posé par workflow.js) → aucune autre modale touchée.
+       La cible du zoneReload (`#…_content`) porte DÉJÀ `.modal-content`, et le HTML chargé en
+       réinjecte un SECOND : on habille l'extérieur en carte et on aplatit l'intérieur. */
+    /* La modale est `position:fixed` DANS l'iframe de la tuile : elle ne peut donc pas être plus
+       haute que la tuile → sur une petite tuile, une taille fixe débordait et se faisait rogner en
+       haut ET en bas (en-tête et boutons hors champ). On borne la carte à la hauteur de l'iframe
+       (`100vh` = hauteur de l'iframe ici) et on rend l'intérieur défilable : le chrome reste toujours
+       atteignable et rien ne dépasse des coins arrondis, quelle que soit la taille de la tuile.
+       `min()` sur la largeur : la modale suit aussi les tuiles étroites. */
+    #id_melissb_dashboard_workflow_comment_modal_content_container.modal { overflow-y: auto !important; }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-dialog {
+      max-width: min(460px, calc(100vw - 20px)) !important;
+      margin: 10px auto !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content {
+      display: flex !important;
+      flex-direction: column !important;
+      max-height: calc(100vh - 20px) !important;
+      border: 1px solid var(--melis-plugin-border) !important;
+      border-radius: 14px !important;
+      overflow: hidden !important;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .28) !important;
+      background: var(--melis-plugin-bg) !important;
+      color: var(--melis-plugin-fg) !important;
+    }
+    /* Le `.modal-content` chargé (2ᵉ couche) porte le défilement : `min-height:0` l'autorise à se
+       réduire sous la hauteur de son contenu dans le conteneur flex, sinon il déborderait la carte. */
+    #id_melissb_dashboard_workflow_comment_modal_content > .modal-content {
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      overflow-y: auto !important;
+      border: 0 !important;
+      border-radius: 0 !important;
+      box-shadow: none !important;
+      background: transparent !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-body { padding: 0 !important; }
+    /* Zone de saisie : plancher bas + plafond relatif à la tuile, pour qu'elle ne monopolise pas
+       une petite modale (c'est la carte qui défile si besoin, pas le textarea qui écrase le reste). */
+    #id_melissb_dashboard_workflow_comment_modal_content_container textarea {
+      min-height: 84px !important;
+      max-height: 40vh !important;
+    }
+    /* En-tête : on neutralise le bandeau rouge (widget-head + onglet actif). */
+    #id_melissb_dashboard_workflow_comment_modal_content_container .widget-tabs .widget-head {
+      background: var(--melis-plugin-bg) !important;
+      border-bottom: 1px solid var(--melis-plugin-border) !important;
+      padding: 4px 8px 0 !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .widget-head ul.nav-tabs {
+      border-bottom: 0 !important;
+      margin: 0 !important;
+      background: transparent !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .widget-head ul.nav-tabs > li > a,
+    #id_melissb_dashboard_workflow_comment_modal_content_container .widget-head ul.nav-tabs > li.active > a {
+      background: transparent !important;
+      border: 0 !important;
+      color: var(--melis-plugin-fg) !important;
+      font-weight: 600 !important;
+      font-size: 15px !important;
+      padding: 12px 14px !important;
+      box-shadow: inset 0 -2px 0 var(--melis-plugin-primary) !important;
+    }
+    /* Glyphe « + » de l'onglet : en couleur de thème plutôt qu'en blanc sur rouge. */
+    #id_melissb_dashboard_workflow_comment_modal_content_container .widget-head ul.nav-tabs > li > a.glyphicons i,
+    #id_melissb_dashboard_workflow_comment_modal_content_container .widget-head ul.nav-tabs > li > a.glyphicons i:before {
+      color: var(--melis-plugin-primary) !important;
+    }
+    /* Corps : libellé + zone de saisie aux tokens du shell. */
+    #id_melissb_dashboard_workflow_comment_modal_content_container .widget-body { padding: 18px 20px !important; }
+    #id_melissb_dashboard_workflow_comment_modal_content_container label,
+    #id_melissb_dashboard_workflow_comment_modal_content_container .control-label {
+      color: var(--melis-plugin-fg) !important;
+      font-weight: 500 !important;
+      font-size: 13px !important;
+      margin-bottom: 6px !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container textarea,
+    #id_melissb_dashboard_workflow_comment_modal_content_container input.form-control {
+      background: var(--melis-plugin-bg) !important;
+      color: var(--melis-plugin-fg) !important;
+      border: 1px solid var(--melis-plugin-border) !important;
+      border-radius: 9px !important;
+      padding: 10px 12px !important;
+      box-shadow: none !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container textarea:focus,
+    #id_melissb_dashboard_workflow_comment_modal_content_container input.form-control:focus {
+      border-color: var(--melis-plugin-primary) !important;
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--melis-plugin-primary) 22%, transparent) !important;
+      outline: none !important;
+    }
+    /* Pied : filet + boutons alignés à droite (« Fermer » sobre, « Ajouter » en couleur de thème).
+       Le legacy pose `justify-content-between` + `float-left` sur Fermer → on repasse en flex à
+       droite, `order` verrouillant Fermer avant Ajouter. */
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-footer {
+      border-top: 1px solid var(--melis-plugin-border) !important;
+      padding: 14px 20px !important;
+      margin-top: 14px !important;
+      display: flex !important;
+      flex-direction: row !important;
+      justify-content: flex-end !important;
+      gap: 10px !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-footer .btn {
+      float: none !important;
+      margin: 0 !important;
+      min-width: 110px !important;
+      border-radius: 9px !important;
+      padding: 9px 16px !important;
+      font-size: 14px !important;
+      font-weight: 500 !important;
+      box-shadow: none !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      gap: 6px !important;
+      transition: filter .15s ease, background .15s ease !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-footer .btn-danger {
+      order: 1;
+      background: var(--melis-plugin-bg) !important;
+      border: 1px solid var(--melis-plugin-border) !important;
+      color: var(--melis-plugin-fg) !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-footer .btn-danger:hover { background: var(--melis-plugin-row-hover) !important; }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-footer .btn-success {
+      order: 2;
+      background: var(--melis-plugin-primary) !important;
+      border: 1px solid var(--melis-plugin-primary) !important;
+      color: #fff !important;
+    }
+    #id_melissb_dashboard_workflow_comment_modal_content_container .modal-footer .btn-success:hover { filter: brightness(1.08); }
+
+    /* Voile de fond : le legacy le laisse gris/quasi opaque → on repasse à un noir translucide doux. */
+    .modal-backdrop { background: #000 !important; }
+    .modal-backdrop.in { opacity: .45 !important; }
+CSS;
+
         $page = <<<HTML
 <!DOCTYPE html>
-<html>
+<html data-melis-scheme="{$pluginScheme}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1172,9 +1793,20 @@ HTML;
 {$inlineGlobals}
   </script>
 {$cssLinks}
-  <style>/* Accent du thème hôte (cf. `?primary=`). En variable pour n'avoir qu'un point à changer,
-       et pour que les règles ci-dessous restent lisibles. */
-    :root { --melis-plugin-primary: {$pluginPrimary}; }
+  <style>/* Tokens du thème hôte (cf. `?primary=`, `?bg=`… et `?scheme=`). En variables pour n'avoir
+       qu'un point à changer, et pour que les règles ci-dessous restent lisibles — c'est ce qui
+       permet aux règles COMMUNES (bordures de tables, survol de ligne) de valoir dans les deux
+       modes sans avoir à les redéclarer dans le bloc sombre. `color-scheme` fait suivre ce que le
+       navigateur peint lui-même : ascenseurs, champs de formulaire, `<select>`. */
+    :root {
+      --melis-plugin-primary: {$pluginPrimary};
+      --melis-plugin-bg: {$pluginBg};
+      --melis-plugin-fg: {$pluginFg};
+      --melis-plugin-border: {$pluginBorder};
+      --melis-plugin-muted: {$pluginMuted};
+      --melis-plugin-row-hover: {$pluginRowHover};
+      color-scheme: {$pluginScheme};
+    }
     /* !important + padding: le thème legacy (bundle.css, chargé APRÈS ce <style>) pose
        `body { padding-top: 47px }` — la réserve pour sa navbar fixe, qui n'existe pas ici. Sans ça
        le contenu du plugin démarre 47px trop bas dans la tuile React (grosse bande vide en haut). */
@@ -1348,10 +1980,92 @@ HTML;
     .pros-dash-tbl thead th,
     .melis-commerce-dashboard-plugin-order-numbers-table thead th { background: var(--melis-plugin-primary) !important; color: #fff !important; border: 0 !important; font-weight: 600; padding: 8px 12px !important; white-space: nowrap; }
     .pros-dash-tbl tbody td,
-    .melis-commerce-dashboard-plugin-order-numbers-table tbody td { padding: 9px 12px !important; border-top: 1px solid #f0f0f0 !important; vertical-align: middle; }
-    .pros-dash-tbl tbody tr:hover td,
-    .melis-commerce-dashboard-plugin-order-numbers-table tbody tr:hover td { background: #fafafa !important; }
-    .pros-dash-tbl .pros-dash-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }</style>
+    .melis-commerce-dashboard-plugin-order-numbers-table tbody td { padding: 9px 12px !important; border-top: 1px solid var(--melis-plugin-border) !important; vertical-align: middle; }
+    /* Survol de ligne : conservé pour les commandes, mais volontairement ABSENT pour les prospects
+       (`.pros-dash-tbl`) — demande explicite « pas d'effet au survol » sur cette table. */
+    .melis-commerce-dashboard-plugin-order-numbers-table tbody tr:hover td { background: var(--melis-plugin-row-hover) !important; }
+    .pros-dash-tbl .pros-dash-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* ── Onglets d'en-tête du plugin Workflow (MelisSmallBusiness) ─────────────────────────────
+       Le module fige la hauteur des onglets à 54px sous 767px
+       (melis-small-business/public/css/style.css, `@media only screen and (max-width: 767px)`).
+       Cette règle visait le BO classique sur mobile ; ici elle s'applique TOUJOURS, parce que la
+       media query est évaluée contre la largeur de l'IFRAME (celle de la tuile), pas de la fenêtre
+       — même piège que le `$gridFix` plus haut. Les onglets n'ont besoin que des ~32px de leur
+       padding (`.nav-tabs > li > a`), d'où une bande verte à moitié vide sous les libellés.
+       `height: auto` rend la hauteur au padding, et laisse le libellé passer à deux lignes s'il
+       est long. Corrigé ICI et pas dans la vue du module : le BO legacy n'est pas touché.
+       Même spécificité que la règle du module, mais postérieure dans la cascade → l'emporte. */
+    .dashboard-workflow-container .nav-tabs li { height: auto !important; }
+    /* ── Barre des TYPES de demande (PAGE / TEAM …) ────────────────────────────────────────────
+       C'est le `.widget-head` sous les onglets verts : une rangée d'onglets « icône seule »
+       (`widget-tabs-icons-only-2` rogne le libellé à 38px → il ne reste que le glyphe). Le thème
+       lui met DEUX filets qui se cumulent en un trait dur pleine largeur — celui de `ul.nav-tabs`
+       (bundle) ET celui de `a.glyphicons` (styles.css) — collé au sommet de la 1ʳᵉ ligne, d'où
+       l'impression que le glyphe « flotte » sur un trait qui coupe le contenu.
+       On ne garde qu'UN filet, en couleur de thème, et on l'espace du contenu. On ne touche PAS à
+       la couleur des glyphes (i:before) : le legacy est conservé. */
+    .melissb-dashboard-workflow .dashboard-workflow-tabs > .widget-head { padding: 6px 14px 0 !important; margin: 0 !important; background: transparent !important; }
+    .melissb-dashboard-workflow .dashboard-workflow-tabs > .widget-head ul.nav-tabs { margin: 0 !important; border-bottom: 1px solid var(--melis-plugin-border) !important; }
+    .melissb-dashboard-workflow .dashboard-workflow-tabs > .widget-head ul.nav-tabs > li > a.glyphicons { border-bottom: 0 !important; }
+    /* Le thème « icons-only-2 » enferme l'onglet dans une boîte de 38px (`a.glyphicons{width:38px}`,
+       `i{display:block;line-height:40px}`), ce qui EJECTE le libellé du type (PAGE / TEAM …) hors du
+       cadre → il ne reste qu'un glyphe orphelin. On rend la boîte élastique et on remet glyphe +
+       libellé EN LIGNE : le nom du type redevient lisible. Couleurs de glyphe INCHANGÉES (le legacy
+       peint `i:before` en #cbcbcb / #505050 actif — on n'y touche pas). */
+    .melissb-dashboard-workflow .widget-tabs-icons-only-2 > .widget-head ul li a.glyphicons { width: auto !important; padding: 7px 12px !important; display: inline-flex !important; align-items: center; font-size: 12px; }
+    .melissb-dashboard-workflow .widget-tabs-icons-only-2 > .widget-head ul li a.glyphicons i { width: auto !important; display: inline-block !important; line-height: 1 !important; margin-right: 7px; }
+    .melissb-dashboard-workflow .widget-tabs-icons-only-2 > .widget-head ul li a.glyphicons i:before { width: auto !important; display: inline-block !important; line-height: 1 !important; position: static !important; }
+    /* Onglet de type actif : léger fond + souligné en couleur de thème pour le repérer (le glyphe
+       actif reste #505050, on n'ajoute qu'un repère de fond/soulignement — pas une couleur de police). */
+    .melissb-dashboard-workflow .widget-tabs-icons-only-2 > .widget-head ul li.active a.glyphicons { background: var(--melis-plugin-row-hover) !important; border-radius: 6px 6px 0 0 !important; box-shadow: inset 0 -2px 0 var(--melis-plugin-primary); }
+    /* Corps des demandes : un peu d'air sous le filet de la barre de types. */
+    .melissb-dashboard-workflow .dashboard-workflow-tabs > .widget-body { padding-top: 6px !important; }
+    /* ── Liste des demandes du plugin Workflow (MelisSmallBusiness) ────────────────────────────
+       Même piège que ci-dessus, mais sur les LIGNES : le module positionne le bloc d'actions
+       (validate / refuse / badge VALIDATED / œil) en `position:absolute; right:0; top:-12px`, puis
+       le repasse en `position:relative; float:right` sous 991px. La media query s'évaluant contre
+       la largeur de l'IFRAME, c'est TOUJOURS la variante « mobile » qui s'applique ici : les
+       actions retombent dans le flux, le `top:-12px` les fait mordre sur la ligne du dessus, et
+       elles se collent au texte date/détails — d'où des lignes serrées et qui se chevauchent.
+       On remet la ligne en flux normal, en flex : flèche, tête (date - détails) extensible, bloc
+       d'actions poussé à droite, et le détail dépliable (`.wd-cont-content`, affiché au clic) sur
+       sa propre ligne pleine largeur. Corrigé ICI et pas dans la vue du module : le BO legacy
+       n'est pas touché. */
+    /* ⚠️ Cause racine du « texte rogné » : le thème (bundle.css, `.widget-activity ul.list li`)
+       impose aux lignes une HAUTEUR fixe avec `line-height: 39px` et `overflow: hidden`. Avec
+       `box-sizing: border-box`, notre padding de 16px ne fait que réduire la zone de contenu à
+       ~7px → la ligne (≈47px) est coupée à une lichette. On rend donc la hauteur au contenu :
+       `height/min-height: auto`, `line-height: normal`, `overflow: visible`. C'est CE bloc qui
+       débloque l'affichage — le padding seul ne suffisait pas. */
+    .melissb-dashboard-workflow .widget-body ul.list li { padding: 14px 18px !important; height: auto !important; min-height: 0 !important; line-height: normal !important; overflow: visible !important; border-bottom: 1px solid var(--melis-plugin-border); }
+    .melissb-dashboard-workflow .widget-body ul.list li:last-child { border-bottom: 0; }
+    .melissb-dashboard-workflow .wd-cont { display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px; row-gap: 6px; line-height: 1.45; }
+    .melissb-dashboard-workflow .wd-cont span { line-height: 1.45; }
+    /* La flèche est en `float:left` + marges dans le thème du module : inutile (et nuisible) en flex. */
+    .melissb-dashboard-workflow .wd-cont > span.fa-arrow-down { float: none !important; margin: 0 !important; order: 0; }
+    /* `min-width:0` : sans ça la tête ne peut pas se réduire sous la largeur de son texte et pousse
+       le bloc d'actions hors de la tuile. */
+    .melissb-dashboard-workflow .wd-cont > .wd-cont-head { order: 1; flex: 1 1 auto; min-width: 0; }
+    .melissb-dashboard-workflow .wd-cont > .d-workflow-action-cont { order: 2; position: static !important; float: none !important; top: auto !important; right: auto !important; height: auto !important; margin-left: auto; display: flex; align-items: center; gap: 6px; }
+    .melissb-dashboard-workflow .wd-cont > .wd-cont-content { order: 3; flex: 0 0 100%; }
+    /* Les icônes d'action portent `padding: 13px 10px` (calibré pour une ligne haute du BO
+       classique) : dans la tuile elles gonflent la ligne et se touchent. */
+    .melissb-dashboard-workflow .dashboard-widget-workflow ul.list li .d-workflow-action-cont i { padding: 4px 6px !important; }
+    .melissb-dashboard-workflow .dashboard-widget-workflow ul.list li span:last-child i { padding-right: 6px !important; }
+    /* Le module plafonne la zone à 287px : dans une tuile redimensionnable, ça laisse un grand vide
+       en bas (tuile haute) ou un ascenseur imbriqué. La tuile gère déjà son propre défilement. */
+    .melissb-dashboard-workflow .dashboard-widget-workflow { max-height: none !important; }
+    /* Alignement de la tête (date - détails) : simple mise en ligne, SANS toucher aux couleurs de
+       police legacy (le module garde son `uppercase; bold`). On laisse juste le libellé se tronquer
+       proprement plutôt que de pousser le bloc d'actions hors de la tuile. */
+    .melissb-dashboard-workflow .wd-cont-head { display: flex; align-items: baseline; gap: 6px; }
+    .melissb-dashboard-workflow .wd-cont-head .wd-date { white-space: nowrap; }
+    .melissb-dashboard-workflow .wd-cont-head .wd-info-cont:not(.wd-date) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Le détail dépliable respire et se démarque de la tête. */
+    .melissb-dashboard-workflow .dashboard-widget-workflow ul.list li .wd-cont-content { padding: 8px 0 2px !important; border-top: 1px solid var(--melis-plugin-border); }
+    .melissb-dashboard-workflow .wd-cont-content p + p { margin-top: 4px !important; }
+{$workflowDialogCss}
+{$darkCss}</style>
 </head>
 <body>
 <!-- Barre d'onglets factice (cachée). melisCore.js, à son init, ÉCRASE le global activeTabId avec
@@ -1388,8 +2102,82 @@ HTML;
 <div id="{$zoneId}" class="container-level-a tab-pane active" data-melisKey="meliscore_dashboard">
 {$html}
 </div>
+<!-- Conteneur des modales legacy. `melisHelper.createModal()` (melisHelper.js) fait
+     `\$("#melis-modals-container").append(html)` PUIS `new bootstrap.Modal('#'+id)`. Absent de cette
+     page iframe, l'append était un no-op → la modale n'entrait jamais dans le DOM → Bootstrap 5 ne
+     trouvait pas l'élément et son BaseComponent sort sans poser `_config` → `_initializeBackDrop`
+     plante sur « this._config is undefined ». Déclencheur : plugin Workflow — valider/refuser une
+     demande ouvre ensuite une modale de commentaire (workflow.js). Le BO classique porte ce
+     conteneur dans son layout ; on le recrée ici (comme le strip d'onglets factice plus haut). -->
+<div id="melis-modals-container"></div>
 {$bodyJs}
+{$flotPatch}
+{$orderMessagesPatch}
 {$callbackBlocks}
+<script>
+/* ── Modale « Ajouter un commentaire » du plugin Workflow → rendue par l'HÔTE React ───────────
+   Le legacy ouvre cette modale DANS l'iframe de la tuile (melisHelper.createModal → workflow.js),
+   où elle est fatalement rognée par une petite tuile (position:fixed = viewport de l'iframe). On
+   intercepte donc son ouverture — et UNIQUEMENT pour ce melisKey — pour demander au shell React de
+   l'afficher en overlay plein écran, centré sur la page (même principe que la modale d'engrenage).
+   Toutes les autres modales (autres melisKey, autres plugins) retombent sur le comportement original.
+   Les paramètres (action valider/refuser + id page/news/blog) sont ceux que workflow.js passait à
+   createModal : le dialog React POST ensuite vers le MÊME endpoint (addWorkflowComments). */
+(function(){
+  var h = window.melisHelper;
+  if (!h || typeof h.createModal !== 'function') return;
+  var orig = h.createModal;
+  h.createModal = function(zoneId, melisKey, hasCloseBtn, parameters){
+    if (melisKey === 'melissb_dashboard_workflow_comment_modal_content') {
+      var target = window.__melisRealParent || window.parent;
+      if (target && target !== window) {
+        try { target.postMessage({ __melisWorkflowComment: true, params: parameters || {} }, '*'); } catch(e) {}
+        return; /* ne pas ouvrir la modale legacy dans l'iframe */
+      }
+    }
+    return orig.apply(this, arguments);
+  };
+})();
+</script>
+<script>
+/* ── Pop-up de confirmation « Valider / Refuser » → rendue par l'HÔTE React (centrée) ─────────
+   Même problème que la modale de commentaire : melisCoreTool.confirm ouvre un BootstrapDialog DANS
+   l'iframe de la tuile, rogné sur une petite tuile. On l'affiche donc en overlay React plein écran.
+   MAIS le callback « Oui » doit s'exécuter DANS l'iframe (il POST saveWorkflowActions puis enchaîne
+   sur la modale de commentaire, avec les variables scopées du tool) — d'où un ALLER-RETOUR : on
+   demande à l'hôte d'afficher la boîte, il renvoie le choix, et on rejoue ICI le bon callback.
+   Générique (tout confirm de plugin dashboard passe par là) ; repli sur le legacy si l'hôte manque. */
+(function(){
+  var tool = window.melisCoreTool;
+  if (!tool || typeof tool.confirm !== 'function') return;
+  var orig = tool.confirm, pending = {}, seq = 0;
+  tool.confirm = function(textOk, textNo, title, msg, onYes, onNo){
+    var target = window.__melisRealParent || window.parent;
+    if (target && target !== window) {
+      var id = ++seq;
+      pending[id] = { onYes: onYes, onNo: onNo };
+      try {
+        target.postMessage({ __melisConfirm: true, id: id, title: title, message: msg, textOk: textOk, textNo: textNo }, '*');
+        return;
+      } catch(e) { delete pending[id]; }
+    }
+    return orig.apply(this, arguments);
+  };
+  window.addEventListener('message', function(e){
+    var d = e.data;
+    if (!d || !d.__melisConfirmResult) return;
+    if (e.source !== (window.__melisRealParent || window.parent)) return;
+    var p = pending[d.id];
+    if (!p) return;
+    delete pending[d.id];
+    try {
+      if (d.result === 'yes') { if (typeof p.onYes === 'function') p.onYes(); }
+      else if (d.result === 'no') { if (typeof p.onNo === 'function') p.onNo(); }
+      /* 'dismiss' (croix / fond / Échap) = ne rejoue NI l'un NI l'autre, comme la croix du legacy. */
+    } catch(err) { console.warn(err); }
+  });
+})();
+</script>
 <script>
 /* ── `melisDashBoardDragnDrop.refreshWidget` : version iframe ─────────────────────────────
    C'est LE point d'entrée par lequel un plugin legacy se recharge lui-même sans recharger la
@@ -1447,6 +2235,70 @@ HTML;
       })
       .always(function(){ zone.css('opacity', ''); });
   };
+
+  /* ── `melisDashBoardDragnDrop.saveCurrentDashboard` : version iframe ────────────────────
+     Second point d'entrée legacy : un plugin qui veut PERSISTER un réglage choisi dans sa vue
+     écrit la nouvelle valeur dans son `.dashboard-plugin-json-config` puis appelle
+     `saveCurrentDashboard(\$(this))` — c'est le cas des boutons Hourly/Daily/Weekly/Monthly de
+     MelisCommerceDashboardPluginOrdersNumber (`.com-orders-dash-chart-line`).
+
+     L'original suppose la grille :
+         \$item  = el.closest('.grid-stack-item').data('_gridstack_node');
+         \$items = \$item._grid.container[0].children;
+     Ici il n'y a pas de gridstack (la grille est côté React) → `_gridstack_node` est `undefined`
+     et la 3ᵉ ligne lève « can't access property "_grid" … is undefined ». L'exception remonte
+     dans le handler `change` du plugin : le réglage n'est jamais enregistré, et au rechargement
+     le widget revient au filtre précédent.
+
+     On NE rejoue PAS `serializeWidgetMap` : il POSTe vers `saveDashboardPlugins`, qui RÉÉCRIT
+     INTÉGRALEMENT le XML de la ligne à partir des seuls plugins reçus
+     (MelisCoreDashboardDragDropZonePlugin::savePlugins). Dans le BO legacy c'est sans risque —
+     la grille envoie TOUS ses widgets d'un coup. Ici chaque plugin vit seul dans son iframe et
+     ne connaît que lui-même : sauver le filtre de Orders EFFACERAIT la config de tous les autres
+     plugins de la ligne (vérifié : le `monthly` de SalesRevenue disparaissait).
+
+     On passe donc par notre propre endpoint, `dashboardPluginConfigSaveAction`, écrit exactement
+     pour ça : il remplace le SEUL noeud `<plugin>` concerné et re-sérialise les autres tels quels.
+     C'est aussi celui qu'utilise la modale de config React — un seul chemin d'écriture.
+
+     La géométrie n'est pas envoyée : cet iframe ignore la position du widget, et la géométrie du
+     dashboard React est sauvée à part par /react-api/dashboard/layout. */
+  window.melisDashBoardDragnDrop.saveCurrentDashboard = function(el){
+    var host = document.getElementById({$zoneIdJs});
+    if (!host) return;
+
+    /* La config du plugin courant : celle que le plugin vient de mettre à jour. On part de `el`
+       (comme l'original) et on retombe sur la zone si le nœud n'est pas dans un .grid-stack-item. */
+    var \$cfgNode = el && el.closest ? el.closest('.grid-stack-item').find('.dashboard-plugin-json-config').first() : jq();
+    if (!\$cfgNode.length) \$cfgNode = jq(host).find('.dashboard-plugin-json-config').first();
+
+    var cfgTxt = \$cfgNode.text();
+    if (!cfgTxt) return;
+
+    var cfg;
+    try { cfg = JSON.parse(cfgTxt); } catch (e) { return; }
+
+    var pluginName = (cfg.conf && cfg.conf.name) || cfg.plugin_id;
+    if (!pluginName) return;
+
+    /* `savePluginConfigToXml(\$post)` lit ses champs À PLAT (\$config['activeFilter']). On envoie
+       donc les scalaires de `datas` PUIS ceux de la racine — la racine gagne, car c'est là que le
+       plugin écrit la valeur qu'il vient de choisir (`pluginConfig.activeFilter = …`). */
+    var fields = {};
+    function flatten(src){
+      if (!src) return;
+      jq.each(src, function(k, v){
+        if (v === null || typeof v !== 'object') fields[k] = v;
+      });
+    }
+    flatten(cfg.datas);
+    flatten(cfg);
+    /* Posé EN DERNIER : la config porte elle aussi une clé `plugin`, et c'est ce champ que
+       l'action lit pour identifier le plugin — il ne doit pas être écrasé par l'aplatissement. */
+    fields.plugin = pluginName;
+
+    jq.post('/melis/react-dashboard-plugin-config-save', fields);
+  };
 })();
 </script>
 <script>
@@ -1469,6 +2321,37 @@ HTML;
   var cfg = {$savedConfigJs};
   var host = document.getElementById({$zoneIdJs});
   if (!host || !cfg) return;
+  /* PHP sérialise un tableau vide en `[]` : on repart d'un objet pour pouvoir le compléter. */
+  if (Array.isArray(cfg)) cfg = {};
+
+  /* `\$savedConfigJs` est restreint aux champs déclarés dans `modal_form` (sinon un `width: 6`
+     irait cocher un radio valant « 6 »). Or un plugin peut avoir une option SANS entrée de
+     modale : MelisCommerceDashboardPluginOrdersNumber n'expose `activeFilter` que dans ses
+     boutons Hourly/Daily/Weekly/Monthly — sa config n'a pas de `modal_form`, donc `cfg` est vide,
+     rien n'est réaligné, et le `checked` codé en dur sur « hourly » l'emporte à chaque
+     rechargement (le graphique, lui, est bien tracé sur la valeur enregistrée : le JS du plugin
+     la lit dans `.dashboard-plugin-json-config`).
+
+     On complète donc `cfg` avec les `datas` de ce même noeud DOM — la config réellement en base.
+     Filtrées par une LISTE BLANCHE inverse : on écarte les clés de structure du conteneur
+     (géométrie, libellés, callback…), communes à TOUS les plugins ; ne restent que les options
+     propres au plugin. C'est ce qui rend la correction générique sans rouvrir la porte au
+     `width: 6`. */
+  var STRUCT_KEYS = ['plugin_id','plugin','module','name','description','icon','thumbnail',
+                     'jscallback','jsdatas','max_lines','height','width','x-axis','y-axis',
+                     'section','dashboard_id','conf','forward'];
+  try {
+    var node = host.querySelector('.dashboard-plugin-json-config');
+    var datas = node ? (JSON.parse(node.textContent) || {}).datas : null;
+    Object.keys(datas || {}).forEach(function(k){
+      var v = datas[k];
+      if (v === null || typeof v === 'object') return;
+      if (STRUCT_KEYS.indexOf(k) !== -1) return;
+      /* La config déclarée dans `modal_form` reste prioritaire. */
+      if (!Object.prototype.hasOwnProperty.call(cfg, k)) cfg[k] = v;
+    });
+  } catch (e) {}
+
   function sync(){
     Object.keys(cfg).forEach(function(key){
       var value = String(cfg[key]);
@@ -1496,9 +2379,41 @@ HTML;
       });
     });
   }
+  /* ── Le surlignage doit SUIVRE les clics suivants ────────────────────────────────────────
+     `sync()` pose `active`/`focus` sur le label de l'option enregistrée. Ces classes sont posées
+     À LA MAIN : quand l'utilisateur clique ensuite un AUTRE bouton, le navigateur ne fait que
+     déplacer le `checked` du radio — la classe, elle, reste sur l'ancien label. D'où « Weekly
+     reste surligné alors que je clique Daily ».
+
+     On repeint donc le groupe à chaque `change` depuis l'état réel des radios, ce qui rend les
+     classes cohérentes quelle que soit leur origine (nôtres ou celles de la vue). */
+  function repaintGroup(name){
+    Array.prototype.forEach.call(
+      host.querySelectorAll('input[type=radio][name="' + name + '"]'),
+      function(input){
+        var lbl = input.id ? host.querySelector('label[for="' + input.id + '"]') : null;
+        if (!lbl) return;
+        lbl.classList.toggle('active', input.checked);
+        lbl.classList.toggle('focus', input.checked);
+      }
+    );
+  }
+
+  var userPicked = false;
+  host.addEventListener('change', function(e){
+    var t = e.target;
+    if (!t || t.type !== 'radio' || !t.name) return;
+    /* À partir du premier choix de l'utilisateur, sa sélection prime sur la config enregistrée :
+       les re-syncs différés ci-dessous ne doivent plus la ramener en arrière. */
+    userPicked = true;
+    repaintGroup(t.name);
+  });
+
   sync();
   /* Certaines vues (re)dessinent leurs boutons dans un jsCallback : on repasse après coup. */
-  [150, 600, 1500].forEach(function(ms){ window.setTimeout(sync, ms); });
+  [150, 600, 1500].forEach(function(ms){
+    window.setTimeout(function(){ if (!userPicked) sync(); }, ms);
+  });
 })();
 </script>
 <script>
@@ -1675,6 +2590,65 @@ HTML;
   /* Filet : les graphiques flot sont dessinés bien après `load`, et certains redimensionnements
      internes ne font bouger aucun élément observé. */
   [200, 600, 1500, 3000].forEach(function(ms){ window.setTimeout(report, ms); });
+})();
+</script>
+<script>
+/* ── Plugin Workflow (MelisSmallBusiness) : ouvrir la demande dans un ONGLET du BO React ───────
+   L'icône œil (.wd-see) porte un onclick legacy `melisHelper.tabOpen(...)` qui ne sait ouvrir un
+   onglet QUE dans le document de son propre iframe — inopérant ici. On l'intercepte (capture, pour
+   passer AVANT le onclick inline) et on demande à l'hôte React d'ouvrir l'outil comme un vrai onglet,
+   via le pont `__melisOpenTool` déjà écouté par App.tsx. La cible se déduit du `data-wf-opening-js`
+   de la ligne : `tabOpen('titre','icone','tabId','<toolKey>',{ idPage: N })`. Map toolKey→route BO. */
+(function(){
+  if (!document.querySelector('.melissb-dashboard-workflow')) return;
+  var ROUTE_BY_TOOLKEY = { 'meliscms_page': '/melis-cms/page' };
+  document.addEventListener('click', function(e){
+    var see = e.target && e.target.closest ? e.target.closest('.wd-see') : null;
+    if (!see) return;
+    var cont = see.closest('.wd-cont');
+    var openjs = (cont && cont.getAttribute('data-wf-opening-js')) || '';
+    var mk = openjs.match(/tabOpen\s*\([^,]*,[^,]*,[^,]*,\s*'([^']+)'/);
+    var toolKey = mk ? mk[1] : '';
+    var base = ROUTE_BY_TOOLKEY[toolKey];
+    if (!base) return; /* type non mappé → on laisse le handler legacy (inoffensif) */
+    e.preventDefault();
+    e.stopPropagation();
+    var idm = openjs.match(/idPage\s*:\s*(\d+)/);
+    var path = idm ? base + '/' + idm[1] : base;
+    /* 1er argument de tabOpen = le NOM affiché (nom de la page) → on le passe pour que l'onglet
+       s'ouvre directement avec le bon libellé (pas de « Page N » qui clignote avant renommage). */
+    var lm = openjs.match(/tabOpen\s*\(\s*'([^']*)'/);
+    var label = lm ? lm[1] : null;
+    var host = window.__melisRealParent || window.parent;
+    try { if (host && host !== window) host.postMessage({ __melisOpenTool: true, path: path, label: label }, '*'); } catch (err) {}
+  }, true);
+})();
+</script>
+<script>
+/* ── Plugin « Recent page activity » (MelisCmsPageHistoric) : ouvrir la page dans un ONGLET React ─
+   Chaque ligne accessible porte `.melis-openrecenthistoric` ; un handler jQuery délégué
+   (melispagehistoric.js) y appelle `melisHelper.tabOpen(...)`, qui ne sait ouvrir un onglet QUE dans
+   le document de son propre iframe — inopérant ici. On intercepte le clic (capture + stopPropagation,
+   AVANT le handler délégué de bulle) et on demande à l'hôte React d'ouvrir l'éditeur de page comme un
+   vrai onglet, via le pont `__melisOpenTool` (App.tsx) — même mécanisme que l'œil du Workflow. L'id et
+   le nom de la page sont sur la ligne (`data-page-id` / `data-page-title`) ; l'historique ne concerne
+   QUE des pages → route fixe `/melis-cms/page/:id`. */
+(function(){
+  if (!document.querySelector('.melis-openrecenthistoric')) return;
+  document.addEventListener('click', function(e){
+    var row = e.target && e.target.closest ? e.target.closest('.melis-openrecenthistoric') : null;
+    if (!row) return;
+    var pageId = row.getAttribute('data-page-id');
+    if (!pageId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    /* 1er argument de tabOpen = le NOM de la page → on le passe pour que l'onglet s'ouvre directement
+       avec le bon libellé (pas de « Page N » qui clignote avant renommage). */
+    var label = row.getAttribute('data-page-title') || null;
+    var path = '/melis-cms/page/' + pageId;
+    var host = window.__melisRealParent || window.parent;
+    try { if (host && host !== window) host.postMessage({ __melisOpenTool: true, path: path, label: label }, '*'); } catch (err) {}
+  }, true);
 })();
 </script>
 </body>
@@ -2284,6 +3258,57 @@ HTML;
             }
         }
         return array_values(array_unique($names));
+    }
+
+    /**
+     * Remonte les options de `datas` À LA RACINE du JSON de config posé dans le DOM.
+     *
+     * Le conteneur legacy sérialise la config ENTIÈRE (`json_encode($this->pluginConfig)`,
+     * MelisCoreDashboardTemplatingPlugin::sendViewResult) : les options du plugin vivent donc sous
+     * la clé `datas`. Or plusieurs plugins les relisent À LA RACINE :
+     *
+     *     chartFor = JSON.parse(pluginConfig).activeFilter;   // MelisCommerceDashboardPluginOrdersNumber
+     *
+     * → `undefined` au premier rendu. Pour Orders, aucune des branches hourly/daily/weekly/monthly
+     * ne matche : les libellés de l'axe X restent des chaînes VIDES et le POST part sans `chartFor`.
+     * Le graphique se dessine quand même — sans aucune graduation. Ça ne se voyait qu'après un
+     * rechargement, parce qu'un CLIC sur un filtre passe par un autre chemin (l'élément cliqué),
+     * et que le handler écrit, lui, `pluginConfig.activeFilter` à la racine : le clic « réparait »
+     * la config jusqu'au rechargement suivant.
+     *
+     * ⚠️ Le bug est en amont, dans le plugin — il touche AUSSI le back-office classique. On le
+     * corrige ici et pas dans melis-commerce pour garder le chantier React isolé du legacy : on
+     * n'ajoute que des clés ABSENTES à la racine, donc un plugin qui lit déjà correctement sa
+     * config n'est pas affecté.
+     *
+     * Générique : on ne connaît pas les noms d'options des plugins, mais on sait que la racine
+     * porte la structure (conf/datas/forward/plugin_id…) et `datas` les valeurs.
+     */
+    private function hoistPluginConfigDatas(?string $html): ?string
+    {
+        if ($html === null || !str_contains($html, 'dashboard-plugin-json-config')) {
+            return $html;
+        }
+
+        return preg_replace_callback(
+            '#(<div[^>]*class="[^"]*dashboard-plugin-json-config[^"]*"[^>]*>)(.*?)(</div>)#s',
+            static function (array $m): string {
+                $cfg = json_decode(trim($m[2]), true);
+                if (!is_array($cfg) || !is_array($cfg['datas'] ?? null)) {
+                    return $m[0]; // Noeud vide ou inattendu : on n'y touche pas.
+                }
+
+                foreach ($cfg['datas'] as $key => $value) {
+                    // Scalaires seulement, et jamais d'écrasement d'une clé déjà présente.
+                    if (is_array($value) || is_object($value)) continue;
+                    if (array_key_exists($key, $cfg)) continue;
+                    $cfg[$key] = $value;
+                }
+
+                return $m[1] . json_encode($cfg) . $m[3];
+            },
+            $html
+        ) ?? $html;
     }
 
     /**
