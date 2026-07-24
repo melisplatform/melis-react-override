@@ -45,8 +45,7 @@ class PlatformAssetsService
         // CSS: collect all module bundle.css files (loaded in parallel by the browser).
         $cssFiles = [];
         try {
-            $raw      = $sm->get('MelisAssetManagerWebPack')->getAssets(true);
-            $cssFiles = array_values(array_filter((array) ($raw['css'] ?? []), $exists));
+            $cssFiles = array_values(array_filter(self::cachedModuleCss($sm), $exists));
         } catch (\Throwable) {}
 
         // MelisCore's OWN css bundle (Bootstrap + admin layout, i.e. the styling that makes any
@@ -153,6 +152,39 @@ class PlatformAssetsService
         ]);
 
         return ['css' => $css, 'js' => $js, 'inline' => $inline];
+    }
+
+    /**
+     * `MelisAssetManagerWebPack::getAssets(true)['css']` — the platform's module CSS bundle list —
+     * costs ~840ms: getAssets() calls getMergedAssets() FOUR times, each walking every module's
+     * config + filesystem. The list is GLOBAL and deterministic per deploy (it changes only when
+     * assets are rebuilt or a module is (de)activated), yet build() runs on EVERY tool/dashboard
+     * iframe render — ~9 per dashboard load, so ~7.5s of pure redundant work. Cache it cross-request
+     * (file in the system temp dir, short TTL) plus an in-process memo. First render after a fresh
+     * container pays the ~840ms once; every render for the next TTL reads the cache (~0ms).
+     *
+     * Cache the RAW list only (not the whole build()): the locale-dependent JS list and the scheme
+     * colours are ~0ms to recompute, so they stay always-fresh — no staleness on a scheme change.
+     */
+    private static function cachedModuleCss(ServiceManager $sm): array
+    {
+        static $memo = null;
+        if ($memo !== null) {
+            return $memo;
+        }
+        $file = sys_get_temp_dir() . '/melis-react-platform-css.json';
+        if (is_file($file) && (time() - (int) filemtime($file)) < 600) {
+            $cached = json_decode((string) @file_get_contents($file), true);
+            if (is_array($cached)) {
+                return $memo = $cached;
+            }
+        }
+        $raw = $sm->get('MelisAssetManagerWebPack')->getAssets(true);
+        $css = array_values((array) ($raw['css'] ?? []));
+        if ($css !== []) {
+            @file_put_contents($file, json_encode($css), LOCK_EX);
+        }
+        return $memo = $css;
     }
 
     /**

@@ -990,6 +990,7 @@ HTML;
             } catch (\Throwable) {}
         }
 
+
         return [
             'html'      => $html,
             'callbacks' => $jsCallBacks,
@@ -1077,9 +1078,8 @@ HTML;
         $pluginBorder = $this->sanitizeCssColor($this->getRequest()->getQuery('border', ''), '#f0f0f0');
         $pluginMuted  = $this->sanitizeCssColor($this->getRequest()->getQuery('muted', ''), '#888888');
         // Survol de ligne : pas un token de l'hôte (il n'en expose pas d'équivalent), donc dérivé du
-        // mode. Un voile translucide en sombre — il se pose sur la couleur réelle du fond, quelle
-        // qu'elle soit, là où une teinte opaque figerait une nuance.
-        $pluginRowHover = $pluginScheme === 'dark' ? 'rgba(255,255,255,0.06)' : '#fafafa';
+        // MODE. N'est plus calculé ici mais porté par l'attribut `data-melis-scheme` (voir le <style>
+        // plus bas) → il suit une bascule clair/sombre à chaud, sans recharger l'iframe.
 
         $render = $this->renderDashboardPlugin($pluginName);
 
@@ -1212,13 +1212,20 @@ JS;
         // `.widget-body`) et textes sombres codés en dur. On les remplace par les tokens de l'hôte
         // pour que le contenu du plugin suive le thème. Émis en DERNIER dans le <style> — à
         // spécificité égale, la dernière règle gagne.
-        $darkCss = $pluginScheme !== 'dark' ? '' : <<<CSS
-    /* ── Mode sombre (cf. `?scheme=dark`) ─────────────────────────────────────────────────── */
+        // ⚠️ TOUJOURS émis désormais (avant : uniquement si `scheme=dark`). Gaté sous
+        // `html[data-melis-scheme="dark"]` via l'imbrication CSS native : basculer cet attribut (à
+        // chaud, cf. le listener `__melisRetheme` plus bas) active/désactive tout ce bloc SANS
+        // recharger l'iframe — c'est ce qui rend la bascule clair/sombre instantanée. L'iframe tourne
+        // le même moteur moderne que l'hôte React (Tailwind v4 exige déjà l'imbrication CSS) → sûr.
+        $darkCss = <<<CSS
+    /* ── Mode sombre (attribut `data-melis-scheme="dark"`, posé au chargement OU à chaud) ────── */
+    html[data-melis-scheme="dark"] {
     /* Le fond du DOCUMENT iframe lui-même : la feuille legacy (bundle.css, chargée après) peint le
        body en BLANC. Sans le repeindre, les surfaces de widget passées en `transparent` ci-dessous
        laissent transparaître ce body blanc → la tuile reste claire (le vrai symptôme observé). On le
        met à la couleur de carte de l'hôte pour que le plugin repose sur un fond sombre cohérent. */
-    html, body { background: var(--melis-plugin-bg) !important; }
+    background: var(--melis-plugin-bg) !important; /* l'élément <html> lui-même */
+    body { background: var(--melis-plugin-bg) !important; }
     body, #{$zoneId} { color: var(--melis-plugin-fg); }
 
     /* ── Surfaces neutres → transparentes ─────────────────────────────────────────────────────
@@ -1495,6 +1502,7 @@ JS;
        (`> div`) : la pastille intérieure exprime la couleur de la série via sa PROPRE bordure —
        la repeindre éteindrait les couleurs du graphique. */
     #{$zoneId} .legend .legendColorBox > div { border-color: var(--melis-plugin-border) !important; }
+    } /* ← fin de html[data-melis-scheme="dark"] { … } (bloc de surcharges sombres, gaté par l'attribut) */
 CSS;
 
         // ── Pop-up de confirmation « Valider / Refuser » (plugin Workflow) — habillage React ──────
@@ -1790,6 +1798,30 @@ CSS;
       });
     }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
   } catch(e) {}
+  /* ── Re-thème À CHAUD (sans rechargement) ───────────────────────────────────────────────────
+     L'hôte React n'encode PLUS le thème dans l'URL de l'iframe : le faire changeait le `src` et
+     rechargeait tout le bundle plateforme (jQuery/Bootstrap/flot/DataTable + refetch des données) →
+     plusieurs secondes à chaque bascule clair/sombre. Il pousse désormais les tokens ici. On met à
+     jour les 5 variables CSS de surface + l'attribut de scheme (qui pilote le bloc de surcharges
+     sombres et le survol de ligne) : tout le rendu CSS suit instantanément, aucun rechargement.
+     ⚠️ Les graphiques flot sont peints dans un <canvas> : ils ne se recolorent pas par CSS. Limite
+     connue de cette v1 (le fond/la grille du graphe ne suivent qu'au prochain redraw). */
+  try {
+    window.addEventListener('message', function(e){
+      var d = e && e.data;
+      if (!d || !d.__melisRetheme) return;
+      var el = document.documentElement, s = el.style;
+      if (d.primary) s.setProperty('--melis-plugin-primary', d.primary);
+      if (d.bg)      s.setProperty('--melis-plugin-bg', d.bg);
+      if (d.fg)      s.setProperty('--melis-plugin-fg', d.fg);
+      if (d.border)  s.setProperty('--melis-plugin-border', d.border);
+      if (d.muted)   s.setProperty('--melis-plugin-muted', d.muted);
+      if (d.scheme === 'dark' || d.scheme === 'light') {
+        el.setAttribute('data-melis-scheme', d.scheme);
+        s.colorScheme = d.scheme;
+      }
+    });
+  } catch(e) {}
 {$inlineGlobals}
   </script>
 {$cssLinks}
@@ -1804,9 +1836,14 @@ CSS;
       --melis-plugin-fg: {$pluginFg};
       --melis-plugin-border: {$pluginBorder};
       --melis-plugin-muted: {$pluginMuted};
-      --melis-plugin-row-hover: {$pluginRowHover};
       color-scheme: {$pluginScheme};
     }
+    /* Survol de ligne : dérivé du MODE (l'hôte n'expose pas de token équivalent), donc porté par
+       l'attribut de scheme — un basculement live (JS flippe `data-melis-scheme`) reprend la bonne
+       valeur sans recharger. Voile translucide en sombre (se pose sur le vrai fond, quel qu'il soit),
+       gris discret en clair. Les 5 tokens ci-dessus, eux, sont réécrits à chaud par `__melisRetheme`. */
+    html[data-melis-scheme="light"] { --melis-plugin-row-hover: #fafafa; }
+    html[data-melis-scheme="dark"]  { --melis-plugin-row-hover: rgba(255,255,255,0.06); }
     /* !important + padding: le thème legacy (bundle.css, chargé APRÈS ce <style>) pose
        `body { padding-top: 47px }` — la réserve pour sa navbar fixe, qui n'existe pas ici. Sans ça
        le contenu du plugin démarre 47px trop bas dans la tuile React (grosse bande vide en haut). */
@@ -1944,6 +1981,16 @@ CSS;
     .layout-timeline ul.timeline > li .type::before { display: block !important; right: -24px !important; }
     .layout-timeline ul.timeline > li .type .time { position: absolute !important; top: 24px !important; left: auto !important; right: 0 !important; }
     .layout-timeline ul.timeline > li.active::before { display: block !important; left: -20px !important; }
+
+    /* ── Objet média (avatar + nom) de chaque annonce ─────────────────────────────────────────
+       Le thème vise le rendu Bootstrap `.media{display:flex}` : la gouttière avatar↔nom vient de
+       `.layout-timeline .media .media-body{margin-left:15px}`. Mais une règle legacy repasse
+       `.media{display:block}` (dernière déclaration `display` du bundle) → l'avatar `float-left`
+       de 50px AVALE ce margin-left et le nom vient coller l'image (symptôme signalé, visible
+       surtout en sombre où le disque blanc de l'avatar tranche sur le fond). On rétablit donc le
+       flex attendu par le thème : l'avatar redevient le 1er item, le margin-left du corps agit à
+       nouveau comme gouttière. Scopé à la frise → n'affecte que le plugin Annonces. */
+    .layout-timeline .media { display: flex !important; align-items: flex-start; }
 
     /* ── Reprise de mise en page : bloc « KPI + derniers prospects » (MelisCmsProspects) ──
        Le markup legacy juxtapose un `.col-sm-3` (icône + total) et un `.col-sm-9` (table) dans un
