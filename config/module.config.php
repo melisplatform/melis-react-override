@@ -105,7 +105,10 @@ return [
                 // CMS trio is active.
                 'priority' => 1000,
                 'options' => [
-                    'regex'    => '/melis-react(?<spa>/[a-zA-Z0-9_\-/]*)?',
+                    // Include `~` (composite id separator, e.g. mini-templates/<site>~<name>) and `.`
+                    // so those deep links also resolve to the SPA on a full-page reload instead of
+                    // falling through to MelisFront (→ 301 to /404). Everything under /melis-react is SPA.
+                    'regex'    => '/melis-react(?<spa>/[a-zA-Z0-9_\-/~.]*)?',
                     'spec'     => '/melis-react%spa%',
                     'defaults' => [
                         'controller' => 'MelisReactOverride\Controller\Spa',
