@@ -2090,10 +2090,17 @@ CSS;
     .melissb-dashboard-workflow .wd-cont span { line-height: 1.45; }
     /* La flèche est en `float:left` + marges dans le thème du module : inutile (et nuisible) en flex. */
     .melissb-dashboard-workflow .wd-cont > span.fa-arrow-down { float: none !important; margin: 0 !important; order: 0; }
-    /* `min-width:0` : sans ça la tête ne peut pas se réduire sous la largeur de son texte et pousse
-       le bloc d'actions hors de la tuile. */
-    .melissb-dashboard-workflow .wd-cont > .wd-cont-head { order: 1; flex: 1 1 auto; min-width: 0; }
-    .melissb-dashboard-workflow .wd-cont > .d-workflow-action-cont { order: 2; position: static !important; float: none !important; top: auto !important; right: auto !important; height: auto !important; margin-left: auto; display: flex; align-items: center; gap: 6px; }
+    /* ⚠️ `flex-basis: 0` et NON `auto` — c'est ce qui garde le bloc d'actions (l'œil) SUR LA MÊME
+       LIGNE que la date quand la tuile est étroite. Le passage à la ligne d'un conteneur flex se
+       décide sur la taille HYPOTHÉTIQUE des items (= leur flex-basis, donc `max-content` quand elle
+       vaut `auto`), AVANT toute réduction : avec `1 1 auto`, la tête faisait 391px de texte dans une
+       ligne de 409px → l'œil ne rentrait plus et tombait à la ligne suivante (mesuré). `min-width:0`
+       n'y change rien : il n'agit qu'APRÈS la répartition en lignes. Avec une base à 0, la tête
+       n'occupe plus de place hypothétique, tout tient sur une ligne, et elle reprend l'espace
+       restant par `flex-grow` (le titre s'ellipse déjà, cf. plus bas). */
+    .melissb-dashboard-workflow .wd-cont > .wd-cont-head { order: 1; flex: 1 1 0%; min-width: 0; }
+    /* `flex: 0 0 auto` : le bloc d'actions garde sa taille — c'est la tête qui absorbe la réduction. */
+    .melissb-dashboard-workflow .wd-cont > .d-workflow-action-cont { order: 2; flex: 0 0 auto; position: static !important; float: none !important; top: auto !important; right: auto !important; height: auto !important; margin-left: auto; display: flex; align-items: center; gap: 6px; }
     .melissb-dashboard-workflow .wd-cont > .wd-cont-content { order: 3; flex: 0 0 100%; }
     /* Les icônes d'action portent `padding: 13px 10px` (calibré pour une ligne haute du BO
        classique) : dans la tuile elles gonflent la ligne et se touchent. */
@@ -2105,8 +2112,10 @@ CSS;
     /* Alignement de la tête (date - détails) : simple mise en ligne, SANS toucher aux couleurs de
        police legacy (le module garde son `uppercase; bold`). On laisse juste le libellé se tronquer
        proprement plutôt que de pousser le bloc d'actions hors de la tuile. */
-    .melissb-dashboard-workflow .wd-cont-head { display: flex; align-items: baseline; gap: 6px; }
-    .melissb-dashboard-workflow .wd-cont-head .wd-date { white-space: nowrap; }
+    .melissb-dashboard-workflow .wd-cont-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; }
+    /* Tuile vraiment étroite : la date passe seule sur sa ligne (le titre suit) plutôt que de
+       déborder sur l'œil. `min-width:0` + ellipse = filet de sécurité pour les cas extrêmes. */
+    .melissb-dashboard-workflow .wd-cont-head .wd-date { white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .melissb-dashboard-workflow .wd-cont-head .wd-info-cont:not(.wd-date) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     /* Le détail dépliable respire et se démarque de la tête. */
     .melissb-dashboard-workflow .dashboard-widget-workflow ul.list li .wd-cont-content { padding: 8px 0 2px !important; border-top: 1px solid var(--melis-plugin-border); }
