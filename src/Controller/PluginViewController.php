@@ -2645,10 +2645,14 @@ CSS;
    onglet QUE dans le document de son propre iframe — inopérant ici. On l'intercepte (capture, pour
    passer AVANT le onclick inline) et on demande à l'hôte React d'ouvrir l'outil comme un vrai onglet,
    via le pont `__melisOpenTool` déjà écouté par App.tsx. La cible se déduit du `data-wf-opening-js`
-   de la ligne : `tabOpen('titre','icone','tabId','<toolKey>',{ idPage: N })`. Map toolKey→route BO. */
+   de la ligne : `tabOpen('titre','icone','tabId','<toolKey>',{ idPage: N })` (l'onglet NEWS porte
+   `'meliscmsnews_page',{ newsId: N }`). Map toolKey→route BO ; l'id est lu quel que soit son nom. */
 (function(){
   if (!document.querySelector('.melissb-dashboard-workflow')) return;
-  var ROUTE_BY_TOOLKEY = { 'meliscms_page': '/melis-cms/page' };
+  var ROUTE_BY_TOOLKEY = {
+    'meliscms_page':     '/melis-cms/page',
+    'meliscmsnews_page': '/melis-cms/news'
+  };
   document.addEventListener('click', function(e){
     var see = e.target && e.target.closest ? e.target.closest('.wd-see') : null;
     if (!see) return;
@@ -2660,7 +2664,9 @@ CSS;
     if (!base) return; /* type non mappé → on laisse le handler legacy (inoffensif) */
     e.preventDefault();
     e.stopPropagation();
-    var idm = openjs.match(/idPage\s*:\s*(\d+)/);
+    /* Le paramètre porte un nom PROPRE À L'OUTIL (`idPage` pour les pages CMS, `newsId` pour les
+       actualités…) → on prend la 1re clé numérique de l'objet passé à tabOpen, sans la nommer. */
+    var idm = openjs.match(/\{[^}]*?[A-Za-z_]\w*\s*:\s*(\d+)/);
     var path = idm ? base + '/' + idm[1] : base;
     /* 1er argument de tabOpen = le NOM affiché (nom de la page) → on le passe pour que l'onglet
        s'ouvre directement avec le bon libellé (pas de « Page N » qui clignote avant renommage). */
