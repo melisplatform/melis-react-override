@@ -1105,6 +1105,15 @@ HTML;
         // qu'avant. La liste blanche sur `scheme` est ce qui garantit que le bloc de surcharges
         // sombres ne peut pas être activé par une valeur inattendue.
         $pluginScheme = $this->getRequest()->getQuery('scheme', '') === 'dark' ? 'dark' : 'light';
+        // ── Tuile en mode MOBILE ──────────────────────────────────────────────────────────────
+        // La largeur de l'IFRAME ne permet pas de décider : une tuile `col-4` d'un dashboard de
+        // bureau fait elle aussi ~350px, et son plugin doit garder la mise en page « fenêtre large »
+        // (c'est tout le rôle de $gridFix plus bas). C'est donc l'HÔTE qui tranche — il porte le
+        // seul booléen responsive du BO React (`useIsNarrow`, largeur de la FENÊTRE) et nous le
+        // transmet ici. Rendu en attribut sur <html> : le bloc de règles « étroit » du <style> y est
+        // scopé, et l'attribut peut être basculé à chaud (postMessage `__melisNarrow`, cf. <head>)
+        // sans recharger l'iframe — rotation d'un téléphone, redimensionnement de la fenêtre.
+        $pluginNarrowAttr = $this->getRequest()->getQuery('narrow', '') === '1' ? ' data-melis-narrow="1"' : '';
         $pluginBg     = $this->sanitizeCssColor($this->getRequest()->getQuery('bg', ''), '#ffffff');
         $pluginFg     = $this->sanitizeCssColor($this->getRequest()->getQuery('fg', ''), '#333333');
         $pluginBorder = $this->sanitizeCssColor($this->getRequest()->getQuery('border', ''), '#f0f0f0');
@@ -1764,9 +1773,106 @@ CSS;
     .modal-backdrop.in { opacity: .45 !important; }
 CSS;
 
+        // ── Mise en page MOBILE des plugins (tuile pleine largeur d'un petit écran) ───────────────
+        //
+        // Scopé à `html[data-melis-narrow="1"]`, posé UNIQUEMENT quand l'hôte React signale un écran
+        // étroit (cf. $pluginNarrowAttr) — donc STRICTEMENT sans effet sur le dashboard de bureau,
+        // y compris sur une petite tuile `col-4` dont l'iframe fait pourtant la même largeur qu'un
+        // téléphone. C'est aussi pour ça que rien ici n'est une media query : les breakpoints
+        // s'évaluent sur la largeur de l'IFRAME, qui ne distingue pas ces deux situations.
+        //
+        // Émis en DERNIER du <style> (après $gridFix et les correctifs par plugin) → à spécificité
+        // supérieure ET postérieur dans la cascade, il l'emporte sans surenchère de !important.
+        // Le bloc s'applique à TOUS les plugins : il n'y a pas de « plugin responsive » à traiter au
+        // cas par cas, seulement des motifs legacy (grille figée, groupes de boutons flottants,
+        // tables larges, frise à gouttière) qui reviennent d'un plugin à l'autre.
+        $narrowCss = <<<'CSS'
+    /* 1. Grille : on ANNULE le figeage de $gridFix. Sur un écran étroit, les colonnes doivent
+       redevenir ce que Bootstrap en ferait sur mobile — une pile pleine largeur. Vaut pour les
+       indicateurs CMS (2×2 → 4 lignes), les blocs KPI+table, les rangées de graphiques. */
+    html[data-melis-narrow="1"] .row > [class*="col-"] { flex: 0 0 100% !important; width: 100% !important; max-width: 100% !important; }
+    /* Gouttières négatives de `.row` : sur une tuile déjà au ras des bords, elles débordent. */
+    html[data-melis-narrow="1"] .row { margin-left: 0 !important; margin-right: 0 !important; }
+    /* `.innerAll` = le padding « BO large » du thème (15px de chaque côté) : ~9% de la largeur
+       d'un téléphone pour rien. */
+    html[data-melis-narrow="1"] .innerAll { padding: 8px !important; }
+
+    /* 2. Blocs `row-merge` reconstruits plus haut en flex HORIZONTAL (prospects : KPI | table,
+       et la rangée porte-graphique) : ils repassent en pile. Sans ça les colonnes remises à 100%
+       ci-dessus resteraient côte à côte et déborderaient de la tuile. */
+    html[data-melis-narrow="1"] .row-merge:has(.pros-dash-tbl),
+    html[data-melis-narrow="1"] .row-merge:has(.flotchart-holder) { display: block !important; }
+    html[data-melis-narrow="1"] .row-merge:has(.pros-dash-tbl) > [class*="col-"] { flex: none !important; width: 100% !important; max-width: none !important; }
+
+    /* 3. Groupes de boutons de filtre (Hourly/Daily/Weekly/Monthly de MelisCommerce, Daily/Monthly/
+       Yearly de Prospects) : `float-right` + 4 boutons côte à côte sortent de la tuile. On les met
+       en flex qui PASSE À LA LIGNE, sur toute la largeur, sous le titre plutôt que flottants. */
+    html[data-melis-narrow="1"] .btn-group.float-right,
+    html[data-melis-narrow="1"] .btn-group.pull-right { float: none !important; }
+    html[data-melis-narrow="1"] .btn-group { display: flex !important; flex-wrap: wrap !important; width: 100% !important; }
+    html[data-melis-narrow="1"] .btn-group > .btn { flex: 1 1 auto !important; white-space: nowrap; }
+
+    /* 4. Barres d'onglets d'un plugin : `nowrap` (règle générique plus haut, pensée pour le BO
+       large) les faisait déborder. Elles passent à la ligne — tous les onglets restent visibles,
+       ce qu'un défilement horizontal ne garantit pas. */
+    html[data-melis-narrow="1"] .widget.widget-tabs > .widget-head ul.nav-tabs { flex-wrap: wrap !important; }
+
+    /* 5. Tables de plugin : elles gardent leur défilement horizontal propre (`.melis-scroll-x`,
+       posé par le script plus bas), mais on resserre les cellules pour que le cas courant tienne
+       sans avoir à faire défiler. */
+    html[data-melis-narrow="1"] .pros-dash-tbl thead th,
+    html[data-melis-narrow="1"] .melis-commerce-dashboard-plugin-order-numbers-table thead th { padding: 6px 8px !important; font-size: 11px; }
+    html[data-melis-narrow="1"] .pros-dash-tbl tbody td,
+    html[data-melis-narrow="1"] .melis-commerce-dashboard-plugin-order-numbers-table tbody td { padding: 7px 8px !important; font-size: 12px; }
+    html[data-melis-narrow="1"] .melis-scroll-x, html[data-melis-narrow="1"] .overflow-x { -webkit-overflow-scrolling: touch; }
+
+    /* 6. Frise du plugin Annonces : le calibrage « gouttière + libellé de date accroché à
+       `right:100%` » (cf. plus haut) réserve ~115px À GAUCHE du contenu. Sur un téléphone c'est le
+       tiers de l'écran, et un libellé hors flux part carrément hors cadre. En étroit, la date
+       revient DANS le flux, au-dessus de sa carte, et la gouttière disparaît. */
+    html[data-melis-narrow="1"] .row:has(.layout-timeline) > [class*="col-"]:empty { display: none !important; }
+    /* Le retrait de 50px de la liste (padding-left du thème) réservait la place du rail et des
+       pastilles — supprimés juste en dessous : mesuré, il ne restait plus que 279px utiles sur
+       390. Sans lui, les cartes d'annonce occupent toute la largeur de la tuile. */
+    html[data-melis-narrow="1"] .layout-timeline ul.timeline { padding: 4px 2px !important; }
+    html[data-melis-narrow="1"] .layout-timeline ul.timeline > li .type {
+      position: static !important; right: auto !important; left: auto !important;
+      margin: 0 0 6px 0 !important; padding: 0 !important; text-align: left !important;
+      white-space: normal !important; width: auto !important; display: block !important;
+    }
+    /* Trait de liaison, pastille et rail : décorations calées sur la gouttière qu'on vient de
+       supprimer — sans cible, elles se retrouveraient posées de travers sur le texte. */
+    html[data-melis-narrow="1"] .layout-timeline ul.timeline > li .type::before,
+    html[data-melis-narrow="1"] .layout-timeline ul.timeline > li .type::after,
+    html[data-melis-narrow="1"] .layout-timeline ul.timeline > li.active::before { display: none !important; }
+    /* L'heure était posée en absolu SOUS le libellé (top:24px) : en flux, elle le suit simplement. */
+    html[data-melis-narrow="1"] .layout-timeline ul.timeline > li .type .time { position: static !important; display: block; }
+
+    /* 7. Plugin Workflow (MelisSmallBusiness) : lignes et onglets resserrés. La tête (date -
+       détails) et le bloc d'actions restent sur UNE ligne (cf. le `flex-basis: 0` plus haut, qui
+       vaut aussi ici) ; c'est le padding « BO large » qui étranglait le texte sur un téléphone. */
+    html[data-melis-narrow="1"] .melissb-dashboard-workflow .widget-body ul.list li { padding: 10px 10px !important; }
+    html[data-melis-narrow="1"] .melissb-dashboard-workflow .widget-tabs-icons-only-2 > .widget-head ul.nav-tabs { flex-wrap: wrap !important; }
+    html[data-melis-narrow="1"] .melissb-dashboard-workflow .widget-tabs-icons-only-2 > .widget-head ul li a.glyphicons { padding: 6px 8px !important; font-size: 11px; }
+    html[data-melis-narrow="1"] .melissb-dashboard-workflow .dashboard-workflow-container .nav-tabs > li > a { padding: 8px 10px !important; font-size: 12px; }
+
+    /* 8. Calendrier (MelisCalendar) : sa barre d'outils (titre + Préc./Suiv. + mois/semaine/jour)
+       est une rangée unique, bien plus large qu'un téléphone. Elle passe à la ligne et ses boutons
+       rétrécissent. */
+    html[data-melis-narrow="1"] .fc-toolbar, html[data-melis-narrow="1"] .fc-header-toolbar { display: flex !important; flex-wrap: wrap !important; gap: 6px; }
+    html[data-melis-narrow="1"] .fc-toolbar .fc-left, html[data-melis-narrow="1"] .fc-toolbar .fc-right, html[data-melis-narrow="1"] .fc-toolbar .fc-center { float: none !important; width: auto !important; }
+    html[data-melis-narrow="1"] .fc-toolbar h2, html[data-melis-narrow="1"] .fc-toolbar-title { font-size: 15px !important; }
+    html[data-melis-narrow="1"] .fc button, html[data-melis-narrow="1"] .fc .fc-button { padding: 2px 7px !important; font-size: 11px !important; height: auto !important; }
+
+    /* 9. Typographie « lead » des tuiles de chiffres (indicateurs CMS, KPI prospects) : calibrée
+       pour une colonne large, elle passait sur 3 lignes dans une carte de téléphone. */
+    html[data-melis-narrow="1"] .lead { font-size: 14px !important; }
+    html[data-melis-narrow="1"] .text-large { font-size: 20px !important; }
+CSS;
+
         $page = <<<HTML
 <!DOCTYPE html>
-<html data-melis-scheme="{$pluginScheme}">
+<html data-melis-scheme="{$pluginScheme}"{$pluginNarrowAttr}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1852,6 +1958,20 @@ CSS;
         el.setAttribute('data-melis-scheme', d.scheme);
         s.colorScheme = d.scheme;
       }
+    });
+  } catch(e) {}
+  /* ── Bascule MOBILE à chaud ───────────────────────────────────────────────────────────────────
+     Même canal, même raison qu'au-dessus : recharger l'iframe pour changer un booléen de mise en
+     page coûterait plusieurs secondes de bundle. L'hôte pousse son `useIsNarrow` (fenêtre du BO,
+     PAS la largeur de cette iframe — cf. le commentaire côté PHP) et on ne fait que poser/retirer
+     l'attribut auquel le bloc « étroit » du <style> est scopé. */
+  try {
+    window.addEventListener('message', function(e){
+      var d = e && e.data;
+      if (!d || !d.__melisNarrow) return;
+      var el = document.documentElement;
+      if (d.narrow) el.setAttribute('data-melis-narrow', '1');
+      else el.removeAttribute('data-melis-narrow');
     });
   } catch(e) {}
 {$inlineGlobals}
@@ -2153,7 +2273,8 @@ CSS;
     .melissb-dashboard-workflow .dashboard-widget-workflow ul.list li .wd-cont-content { padding: 8px 0 2px !important; border-top: 1px solid var(--melis-plugin-border); }
     .melissb-dashboard-workflow .wd-cont-content p + p { margin-top: 4px !important; }
 {$workflowDialogCss}
-{$darkCss}</style>
+{$darkCss}
+{$narrowCss}</style>
 </head>
 <body>
 <!-- Barre d'onglets factice (cachée). melisCore.js, à son init, ÉCRASE le global activeTabId avec
@@ -2172,6 +2293,71 @@ CSS;
      chargement (`var \$navTabs = \$("#melis-id-nav-bar-tabs")`). Chargé depuis <head>, ce cache est
      VIDE (pas encore de <body>) → activeTabId retombe à undefined quoi qu'on fasse. -->
 {$headJs}
+<script>
+/* ── Never let flot draw into a holder that has no dimensions ──────────────────────────────
+   A tile's iframe is not always laid out when its plugin draws: the widget is mounted (and its
+   document runs) while the grid item is still being placed/re-parented by GridStack, or while
+   the tile is collapsed. flot MEASURES its holder at draw time and THROWS on a zero box —
+   `Uncaught Error: Invalid dimensions for plot, width = 0, height = 0` (seen from
+   commerceDashboardOrdersLineGraphInit, MelisCommerceDashboardPluginOrdersNumber.js). Legacy
+   plugins draw from an AJAX callback and never re-try, so the chart then stays EMPTY for good —
+   the resize observer further down only tracks holders that ALREADY carry a flot instance.
+
+   So we wrap `\$.plot`: when the holder has no box yet, the call is QUEUED and replayed as soon
+   as the element gets one (ResizeObserver, exact and immediate; timeouts as a safety net for
+   holders that are re-attached without a size change). Deferred calls return `null`, which is
+   what every legacy plugin here stores in `charts.<x>.plot` — none of them chains on the return
+   value, and their `init()` guards on `plot == null`, so a queued draw is harmless.
+
+   Generic: no per-plugin knowledge, every flot chart of every plugin page benefits. */
+(function(){
+  var jq = window.jQuery;
+  if (!jq || typeof jq.plot !== 'function' || !window.ResizeObserver) return;
+
+  var original = jq.plot;
+  var queued   = [];
+
+  function sized(el){ return !!el && el.clientWidth > 0 && el.clientHeight > 0; }
+
+  var ro = new ResizeObserver(function(){ flush(); });
+
+  function flush(){
+    for (var i = queued.length - 1; i >= 0; i--) {
+      var q = queued[i];
+      /* Holder removed from the document (widget refreshed/closed): drop the pending draw. */
+      if (!q.el.isConnected) { queued.splice(i, 1); try { ro.unobserve(q.el); } catch(e) {} continue; }
+      if (!sized(q.el)) continue;
+      queued.splice(i, 1);
+      try { ro.unobserve(q.el); } catch(e) {}
+      try {
+        original.call(jq, jq(q.el), q.data, q.options);
+        /* Tell the resize observer below to pick up this brand-new chart: its own rescans stop
+           at 3 s, and a chart drawn later would then never be redrawn when the tile is resized. */
+        document.dispatchEvent(new CustomEvent('melis:flot-drawn'));
+      }
+      catch(e) { console.warn('[melis] deferred flot draw failed', e); }
+    }
+  }
+
+  var patched = function(placeholder, data, options){
+    var el = jq(placeholder)[0];
+    if (el && !sized(el)) {
+      queued.push({ el: el, data: data, options: options });
+      try { ro.observe(el); } catch(e) {}
+      return null;
+    }
+    return original.apply(this, arguments);
+  };
+
+  /* flot hangs its own API on \$.plot (\$.plot.plugins, \$.plot.formatDate…) — keep it all. */
+  for (var k in original) {
+    if (Object.prototype.hasOwnProperty.call(original, k)) patched[k] = original[k];
+  }
+  jq.plot = patched;
+
+  [200, 600, 1500, 3000, 6000].forEach(function(ms){ window.setTimeout(flush, ms); });
+})();
+</script>
 <!-- `container-level-a`: the legacy theme gates part of its dashboard rules on this ancestor —
      the classic BO zone carries it (render-dashboard-plugins.phtml). Without it, a plugin's tab
      bar (`.widget-tabs-responsive`, e.g. MelisCmsProspectsStatisticsPlugin) loses its
@@ -2620,6 +2806,9 @@ CSS;
      `refreshWidget`): rescan after every interaction in the page. */
   document.addEventListener('click', function(){ window.setTimeout(scan, 300); }, true);
   document.addEventListener('change', function(){ window.setTimeout(scan, 300); }, true);
+  /* A chart whose draw was DEFERRED (holder without dimensions, see the \$.plot guard above) can
+     appear long after those rescans — it announces itself. */
+  document.addEventListener('melis:flot-drawn', function(){ window.setTimeout(scan, 50); });
 })();
 </script>
 <script>
