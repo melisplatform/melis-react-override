@@ -1923,6 +1923,65 @@ CSS;
        pour une colonne large, elle passait sur 3 lignes dans une carte de téléphone. */
     html[data-melis-narrow="1"] .lead { font-size: 14px !important; }
     html[data-melis-narrow="1"] .text-large { font-size: 20px !important; }
+
+    /* 10. Plugin « Derniers commentaires » (MelisCmsComments) : avatar en COLONNE, pas en bandeau
+       ── Cas 1 : vue initiale (latest-comments.phtml). L'avatar et le corps sont deux colonnes
+       Bootstrap déclarées `col-xl-1 col-lg-1 col-12` / `col-xl-11 col-lg-11 col-12` : sous `lg`,
+       c'est `col-12` qui gagne, soit 100 % CHACUNE — l'avatar occupe donc une ligne entière et le
+       texte passe dessous. Dans une tuile étroite où la vignette fait 40px, il reste ~300px de
+       vide à sa droite et elle paraît orpheline au-dessus du commentaire.
+       Pour CE bloc on veut l'inverse de la règle générique §1 (qui empile les colonnes) : les
+       deux côte à côte, avatar au strict nécessaire, corps élastique. */
+    html[data-melis-narrow="1"] .mccom-comment > .row {
+      display: flex !important;
+      flex-wrap: nowrap !important;
+      align-items: flex-start;
+      gap: 10px;
+      margin: 0 !important;
+    }
+    html[data-melis-narrow="1"] .mccom-comment .column-comment-profile-img {
+      flex: 0 0 auto !important;
+      width: auto !important;
+      max-width: none !important;
+      padding: 0 !important;
+    }
+    html[data-melis-narrow="1"] .mccom-comment .column-media-body {
+      flex: 1 1 auto !important;
+      width: auto !important;
+      max-width: none !important;
+      min-width: 0;
+      padding: 0 !important;
+      /* comments.css pose `margin-top: 1rem` sous 991px — calibré pour l'empilement, il décalait
+         maintenant le texte d'un cran sous l'avatar. */
+      margin-top: 0 !important;
+    }
+    /* ── Cas 2 : partielle rechargée après un changement de filtre (list.phtml). MÊME bloc, markup
+       DIFFÉRENT — `<div class="float-left">` + `<div class="media-body">`, un « media object »
+       Bootstrap 3 dont plus aucune règle ne subsiste (le module ne style que `.column-media-body`,
+       la classe de l'AUTRE vue). Le corps s'habillerait autour du flottant, sauf qu'il contient
+       deux `<div class="clearfix">` qui le NETTOIENT : seul le nom reste à côté de l'avatar, le
+       titre/texte/date repartent sous lui. Même traitement, ciblé par `:has()` pour ne pas toucher
+       la variante « row » ci-dessus. */
+    html[data-melis-narrow="1"] li.mccom-comment:has(> .float-left) {
+      display: flex !important;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    html[data-melis-narrow="1"] .mccom-comment > .float-left { float: none !important; flex: 0 0 auto; margin: 0 !important; }
+    html[data-melis-narrow="1"] .mccom-comment > .media-body { flex: 1 1 auto; min-width: 0; }
+    html[data-melis-narrow="1"] .mccom-comment .clearfix { display: none !important; }
+    /* ── Commun aux deux variantes : liste sans retrait de puces (l'avatar sert déjà de repère),
+       interlignes resserrés, et un filet entre commentaires — une fois les cartes compactées,
+       deux commentaires consécutifs se liraient sinon comme un seul bloc. */
+    html[data-melis-narrow="1"] .mccom-list { padding-left: 0 !important; margin-bottom: 0; list-style: none; }
+    html[data-melis-narrow="1"] .mccom-comment { padding: 8px 0 !important; border-bottom: 1px solid var(--melis-plugin-border); }
+    html[data-melis-narrow="1"] .mccom-comment:last-child { border-bottom: 0; }
+    html[data-melis-narrow="1"] .mccom-comment .media-heading { margin-bottom: 2px !important; }
+    /* Le texte du commentaire hérite d'un `word-break: break-all` (feuille du module) : dans une
+       colonne de ~250px il coupe les mots en plein milieu (« un pe / u long », constaté). On
+       revient à une césure normale ; `overflow-wrap: break-word`, déjà posé sur la zone (§ « socle
+       responsive »), reste le filet pour un vrai token insécable (URL, adresse e-mail). */
+    html[data-melis-narrow="1"] .mccom-comment .mccom-text p { margin: 2px 0 !important; word-break: normal !important; }
 CSS;
 
         $page = <<<HTML
