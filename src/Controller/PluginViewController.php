@@ -1817,9 +1817,64 @@ CSS;
        ce qu'un défilement horizontal ne garantit pas. */
     html[data-melis-narrow="1"] .widget.widget-tabs > .widget-head ul.nav-tabs { flex-wrap: wrap !important; }
 
-    /* 5. Tables de plugin : elles gardent leur défilement horizontal propre (`.melis-scroll-x`,
-       posé par le script plus bas), mais on resserre les cellules pour que le cas courant tienne
-       sans avoir à faire défiler. */
+    /* 5.a Table LARGE → colonne ESSENTIELLE + « + » par ligne ────────────────────────────────
+       Même principe que les listes du BO React (cf. ExpandToggle / HiddenColsRow) : plutôt que
+       de faire défiler la table latéralement — où la moitié des colonnes est hors champ sans que
+       rien ne l'indique — on ne garde QUE la colonne qui identifie la ligne, précédée d'un bouton
+       « + » qui déplie les autres colonnes juste en dessous, en paires « LIBELLÉ : valeur ».
+       La ligne fait alors [+][colonne essentielle] : elle tient dans n'importe quelle largeur,
+       la table reste une table, et rien n'est caché — juste replié.
+       N'est appliqué qu'aux tables qui débordent RÉELLEMENT (mesure à l'exécution, cf. le script
+       plus bas qui pose `melis-exp`). */
+    html[data-melis-narrow="1"] table.melis-exp { width: 100% !important; }
+    /* Colonnes repliées : masquées dans la ligne, restituées dans le bloc déplié. */
+    html[data-melis-narrow="1"] table.melis-exp .melis-exp-hidden { display: none !important; }
+    /* Colonne du bouton, à GAUCHE de tout : c'est là que l'œil la cherche (« déplier CETTE
+       ligne »), pas noyée à droite au milieu des actions. */
+    html[data-melis-narrow="1"] table.melis-exp th.melis-exp-th,
+    html[data-melis-narrow="1"] table.melis-exp td.melis-exp-td {
+      width: 34px !important;
+      padding: 4px 2px 4px 8px !important;
+      text-align: center;
+      vertical-align: middle;
+    }
+    html[data-melis-narrow="1"] table.melis-exp .melis-exp-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; padding: 0; margin: 0;
+      border: 1px solid var(--melis-plugin-border); border-radius: 4px;
+      background: transparent; color: var(--melis-plugin-fg);
+      font-size: 14px; line-height: 1; cursor: pointer;
+    }
+    html[data-melis-narrow="1"] table.melis-exp .melis-exp-btn:hover { background: var(--melis-plugin-row-hover); }
+    /* La colonne essentielle prend toute la place restante et casse les longues valeurs plutôt
+       que de repousser la ligne hors du cadre. */
+    html[data-melis-narrow="1"] table.melis-exp tbody td:not(.melis-exp-td) { word-break: break-word; white-space: normal !important; }
+    /* Bloc déplié : une ligne de table à part entière (colspan sur les 2 colonnes visibles), en
+       retrait sous le bouton pour se rattacher visuellement à sa ligne. */
+    html[data-melis-narrow="1"] table.melis-exp tr.melis-exp-row > td {
+      border-top: 0 !important;
+      padding: 0 10px 8px 44px !important;
+      background: var(--melis-plugin-row-hover) !important;
+    }
+    html[data-melis-narrow="1"] table.melis-exp .melis-exp-pair {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 3px 0; font-size: 12px; line-height: 1.4;
+    }
+    html[data-melis-narrow="1"] table.melis-exp .melis-exp-k {
+      flex: 0 0 auto; min-width: 78px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      color: var(--melis-plugin-muted);
+    }
+    html[data-melis-narrow="1"] table.melis-exp .melis-exp-v { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+    /* Le wrapper ne défile plus : plus rien ne dépasse.
+       ⚠️ `overflow` (les DEUX axes), pas `overflow-x` seul : quand un axe vaut autre chose que
+       `visible`, la spec CSS transforme le `visible` de l'autre axe en `auto` — le legacy pose
+       `overflow-y` sur `.overflow-x`, donc un `overflow-x: visible` isolé recalculait en `auto`
+       (vérifié : `getComputedStyle(wrap).overflowX === 'auto'` malgré la règle). */
+    html[data-melis-narrow="1"] .melis-exp-wrap { overflow: visible !important; }
+
+    /* 5.b Tables qui tiennent encore dans la tuile : cellules resserrées (elles gardent leur
+       défilement propre `.melis-scroll-x` en dernier recours). */
     html[data-melis-narrow="1"] .pros-dash-tbl thead th,
     html[data-melis-narrow="1"] .melis-commerce-dashboard-plugin-order-numbers-table thead th { padding: 6px 8px !important; font-size: 11px; }
     html[data-melis-narrow="1"] .pros-dash-tbl tbody td,
@@ -2731,6 +2786,289 @@ CSS;
 
   wrap();
   [200, 600, 1500, 3000].forEach(function(ms){ window.setTimeout(wrap, ms); });
+})();
+</script>
+<script>
+/* ── Tuile MOBILE : table LARGE → colonne essentielle + « + » qui déplie le reste ──────────
+   Pendant, côté plugin legacy, du motif des listes du BO React (ExpandToggle / HiddenColsRow) :
+   sur un téléphone, on ne garde que la colonne qui IDENTIFIE la ligne, précédée d'un bouton
+   « + » ; les autres colonnes sont repliées dans un bloc « LIBELLÉ : valeur » sous la ligne.
+   La table reste une table (en-tête, tri, handlers de ligne intacts) — c'est la seule chose qui
+   change par rapport au défilement horizontal : plus rien n'est hors champ, tout est à un clic.
+
+   ⚠️ Appliqué UNIQUEMENT aux tables qui débordent RÉELLEMENT — `scrollWidth` de la table contre
+   la largeur de son conteneur. Une table de 3 colonnes courtes qui tient déjà (ex. Prospects)
+   n'a rien à gagner à être repliée, on n'y touche pas. C'est ce test qui rend la règle sûre pour
+   TOUS les plugins sans liste blanche par plugin.
+
+   ⚠️ On ne DÉPLACE ni ne réécrit aucune cellule d'origine : les colonnes repliées sont seulement
+   masquées (classe), et le bloc déplié affiche des COPIES (cloneNode) de leur contenu. Tout code
+   de plugin qui lit `td.textContent` ou cible une cellule continue donc de fonctionner.
+
+   ⚠️⚠️ LE PIÈGE (corrigé ici) : la mesure de débordement exige une table DÉPLIÉE, donc une
+   première version démontait/remontait la table à chaque passage de `scan()`. Or déplier une
+   ligne CHANGE LA HAUTEUR du document → le ResizeObserver tirait `scan()` → démontage/remontage
+   → la ligne se refermait et la table clignotait à chaque clic sur « + ». Pire, la barre de
+   défilement verticale de la tuile apparaît/disparaît avec la hauteur, ce qui fait varier la
+   LARGEUR de quelques pixels → re-mesure → oscillation sans fin. Trois garde-fous :
+     1. le ResizeObserver ne déclenche `scan()` que si la LARGEUR a bougé (la hauteur ne change
+        rien au débordement) ;
+     2. une table déjà repliée n'est PAS démontée tant que la largeur disponible n'a pas bougé de
+        plus de HYSTERESIS px — ce seuil absorbe précisément le va-et-vient d'une barre de
+        défilement ; `collapse()` est alors incrémental (il ne traite que les lignes nouvelles,
+        arrivées en AJAX) ;
+     3. si une re-mesure est vraiment nécessaire, les lignes OUVERTES sont mémorisées puis
+        rouvertes après remontage — l'utilisateur ne perd pas ce qu'il consultait. */
+(function(){
+  var host = document.getElementById({$zoneIdJs});
+  if (!host) return;
+
+  var EXP = 'melis-exp', HID = 'melis-exp-hidden', WRAP = 'melis-exp-wrap';
+  /* Marge de tolérance sur la largeur, en px. Doit couvrir la largeur d'une barre de défilement
+     (~15px) : c'est elle qui apparaît/disparaît quand on déplie une ligne. */
+  var HYSTERESIS = 24;
+
+  /* Par table : index de la colonne gardée, libellés d'en-tête, cellules d'en-tête (pour les
+     libellés-icônes) et largeur à laquelle le repli a été décidé. */
+  var state = new WeakMap();
+
+  function isNarrow(){ return document.documentElement.getAttribute('data-melis-narrow') === '1'; }
+
+  function scrollWrapOf(table){
+    for (var p = table.parentNode; p && p !== host; p = p.parentNode) {
+      if (p.nodeType !== 1) continue;
+      if (p.classList.contains('melis-scroll-x') || p.classList.contains('overflow-x')) return p;
+    }
+    return null;
+  }
+
+  function headerRow(table){
+    var h = table.tHead;
+    return (h && h.rows.length) ? h.rows[0] : null;
+  }
+
+  function availWidth(table){
+    var box = scrollWrapOf(table) || table.parentNode;
+    return (box && box.clientWidth) ? box.clientWidth : 0;
+  }
+
+  /* Colonne à GARDER visible : celle qui identifie la ligne. On cherche un libellé d'en-tête
+     « parlant », par ordre de préférence — une référence de commande identifie mieux qu'un nom,
+     un nom mieux qu'un statut. Sans aucune correspondance on prend la 2ᵉ colonne : la 1ʳᵉ est
+     presque toujours un id numérique, qui n'aide pas à reconnaître la ligne. */
+  var PRIORITY = ['reference', 'référence', 'ref', 'title', 'titre', 'subject', 'objet',
+                  'name', 'nom', 'label', 'libell', 'email', 'login'];
+  function essentialIndex(labels){
+    for (var p = 0; p < PRIORITY.length; p++) {
+      for (var i = 0; i < labels.length; i++) {
+        if (labels[i] && labels[i].toLowerCase().indexOf(PRIORITY[p]) !== -1) return i;
+      }
+    }
+    return labels.length > 1 ? 1 : 0;
+  }
+
+  function detailOf(row){
+    var d = row.nextSibling;
+    while (d && d.nodeType !== 1) d = d.nextSibling;
+    return (d && d.classList.contains('melis-exp-row')) ? d : null;
+  }
+
+  /* Lignes de données (hors blocs dépliés), dans l'ordre — l'index sert de repère stable pour
+     mémoriser/restaurer ce qui était ouvert. */
+  function dataRows(table){
+    var out = [], bodies = table.tBodies;
+    for (var b = 0; b < bodies.length; b++) {
+      var rows = bodies[b].rows;
+      for (var r = 0; r < rows.length; r++) {
+        if (!rows[r].classList.contains('melis-exp-row')) out.push(rows[r]);
+      }
+    }
+    return out;
+  }
+
+  function openIndices(table){
+    var open = [], rows = dataRows(table);
+    for (var i = 0; i < rows.length; i++) {
+      var d = detailOf(rows[i]);
+      if (d && d.style.display !== 'none') open.push(i);
+    }
+    return open;
+  }
+
+  function setOpen(row, open){
+    var d = detailOf(row);
+    if (!d) return;
+    d.style.display = open ? '' : 'none';
+    var btn = row.querySelector('.melis-exp-btn');
+    if (btn) {
+      btn.textContent = open ? '−' : '+';   /* − = U+2212, pas un trait d'union */
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+  }
+
+  function restoreOpen(table, indices){
+    if (!indices || !indices.length) return;
+    var rows = dataRows(table);
+    for (var i = 0; i < indices.length; i++) {
+      if (rows[indices[i]]) setOpen(rows[indices[i]], true);
+    }
+  }
+
+  /* Idempotent ET incrémental : au 1ᵉʳ appel il prépare l'en-tête, aux suivants il ne traite que
+     les lignes pas encore équipées (contenu réinjecté en AJAX). Ne démonte jamais rien. */
+  function collapse(table, avail){
+    var st = state.get(table);
+
+    if (!table.classList.contains(EXP)) {
+      var hrow = headerRow(table);
+      if (!hrow) return;                     /* sans en-tête, pas de libellé à afficher : on laisse */
+      /* Snapshot AVANT insertion : `cells` est une collection VIVANTE, les index glissent dès
+         qu'on insère la colonne du bouton. */
+      var hcells = Array.prototype.slice.call(hrow.cells);
+      var labels = hcells.map(function(c){ return (c.textContent || '').replace(/\s+/g, ' ').trim(); });
+      st = { ess: essentialIndex(labels), labels: labels, hcells: hcells, width: avail };
+      var th = document.createElement('th');
+      th.className = 'melis-exp-th';
+      hrow.insertBefore(th, hrow.cells[0] || null);
+      hcells.forEach(function(c, i){ if (i !== st.ess) c.classList.add(HID); });
+      state.set(table, st);
+      table.classList.add(EXP);
+      var w = scrollWrapOf(table);
+      if (w) w.classList.add(WRAP);
+    } else {
+      if (!st) return;
+      st.width = avail;
+    }
+
+    var rows = dataRows(table);
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      if (row.querySelector('.melis-exp-td')) continue;      /* déjà équipée */
+      var cells = Array.prototype.slice.call(row.cells);
+      if (cells.length < 2) continue;                        /* ligne « aucune donnée » : rien à replier */
+
+      var td = document.createElement('td');
+      td.className = 'melis-exp-td';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'melis-exp-btn';
+      btn.setAttribute('aria-expanded', 'false');
+      btn.textContent = '+';
+      td.appendChild(btn);
+      row.insertBefore(td, row.cells[0] || null);
+      cells.forEach(function(c, i){ if (i !== st.ess) c.classList.add(HID); });
+
+      /* Bloc déplié, masqué au départ. Une VRAIE ligne de table (et non un div hors flux) pour
+         que la largeur suive la table et que le HTML reste valide. */
+      var det = document.createElement('tr');
+      det.className = 'melis-exp-row';
+      det.style.display = 'none';
+      var dtd = document.createElement('td');
+      dtd.colSpan = 2;                       /* les 2 seules colonnes visibles : bouton + essentielle */
+      cells.forEach(function(c, i){
+        if (i === st.ess) return;
+        var pair = document.createElement('div');
+        pair.className = 'melis-exp-pair';
+        /* Libellé : le texte de l'en-tête, ou — quand l'en-tête n'est QU'UNE ICÔNE (colonne
+           quantité/expédition des commandes, par ex.) — une copie de cette icône. Sans ce
+           repli, la valeur s'affichait toute seule, sans dire de quoi il s'agit. */
+        var lbl  = st.labels[i];
+        var icon = lbl ? null : (st.hcells[i] ? st.hcells[i].querySelector('i, img, svg') : null);
+        if (lbl || icon) {
+          var k = document.createElement('span');
+          k.className = 'melis-exp-k';
+          if (lbl) k.textContent = lbl;
+          else k.appendChild(icon.cloneNode(true));
+          pair.appendChild(k);
+        }
+        var v = document.createElement('span');
+        v.className = 'melis-exp-v';
+        /* COPIE du contenu : la cellule d'origine reste intacte (cf. avertissement en tête). */
+        for (var n = 0; n < c.childNodes.length; n++) v.appendChild(c.childNodes[n].cloneNode(true));
+        pair.appendChild(v);
+        dtd.appendChild(pair);
+      });
+      det.appendChild(dtd);
+      row.parentNode.insertBefore(det, row.nextSibling);
+    }
+  }
+
+  function expand(table){
+    if (!table.classList.contains(EXP)) return;
+    var i, list;
+    list = Array.prototype.slice.call(table.querySelectorAll('tr.melis-exp-row'));
+    for (i = 0; i < list.length; i++) list[i].parentNode.removeChild(list[i]);
+    list = Array.prototype.slice.call(table.querySelectorAll('th.melis-exp-th, td.melis-exp-td'));
+    for (i = 0; i < list.length; i++) list[i].parentNode.removeChild(list[i]);
+    list = Array.prototype.slice.call(table.querySelectorAll('.' + HID));
+    for (i = 0; i < list.length; i++) list[i].classList.remove(HID);
+    table.classList.remove(EXP);
+    state.delete(table);
+    var w = scrollWrapOf(table);
+    if (w) w.classList.remove(WRAP);
+  }
+
+  function scan(){
+    var tables = Array.prototype.slice.call(host.getElementsByTagName('table'));
+    for (var i = 0; i < tables.length; i++) {
+      var t = tables[i];
+      if (!isNarrow()) { expand(t); continue; }
+
+      var avail = availWidth(t);
+      if (!avail) continue;                                  /* pas encore mis en page */
+      var st = state.get(t);
+
+      if (t.classList.contains(EXP) && st) {
+        /* Largeur stable → on NE DÉMONTE PAS (sinon : clignotement + perte des lignes ouvertes).
+           On repasse quand même en incrémental pour équiper d'éventuelles lignes AJAX. */
+        if (Math.abs(avail - st.width) <= HYSTERESIS) { collapse(t, avail); continue; }
+        /* Vrai changement de largeur → re-mesure, table dépliée, état d'ouverture préservé. */
+        var open = openIndices(t);
+        expand(t);
+        if (t.scrollWidth > avail + 1) { collapse(t, avail); restoreOpen(t, open); }
+        continue;
+      }
+
+      if (t.scrollWidth > avail + 1) collapse(t, avail);
+    }
+  }
+
+  /* Un seul écouteur délégué. `stopPropagation` est OBLIGATOIRE : plusieurs plugins posent un
+     handler de clic sur la LIGNE (ex. les commandes ouvrent la commande) — sans ça, déplier une
+     ligne l'ouvrirait aussi. */
+  host.addEventListener('click', function(e){
+    var btn = e.target && e.target.closest ? e.target.closest('.melis-exp-btn') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var row = btn.closest('tr');
+    var det = row ? detailOf(row) : null;
+    if (!det) return;
+    setOpen(row, det.style.display === 'none');
+  });
+
+  scan();
+  /* Relances : le contenu arrive souvent en AJAX (getMessages, refreshWidget, changement de
+     filtre). Désormais sans coût visible — une table déjà repliée n'est plus démontée. */
+  [250, 700, 1600, 3200].forEach(function(ms){ window.setTimeout(scan, ms); });
+  document.addEventListener('change', function(){ window.setTimeout(scan, 350); }, true);
+  /* Bascule étroit ↔ large poussée par l'hôte (postMessage `__melisNarrow`). */
+  try {
+    new MutationObserver(function(){ scan(); })
+      .observe(document.documentElement, { attributes: true, attributeFilter: ['data-melis-narrow'] });
+  } catch (e) {}
+  /* Redimensionnement de la tuile : SEULE la largeur peut changer le verdict de débordement.
+     Ignorer la hauteur est ce qui empêche « déplier une ligne » de relancer une re-mesure. */
+  if (window.ResizeObserver && document.body) {
+    var lastW = document.body.clientWidth, pending = 0;
+    new ResizeObserver(function(){
+      var w = document.body.clientWidth;
+      if (w === lastW) return;
+      lastW = w;
+      if (pending) return;
+      pending = requestAnimationFrame(function(){ pending = 0; scan(); });
+    }).observe(document.body);
+  }
 })();
 </script>
 <script>
