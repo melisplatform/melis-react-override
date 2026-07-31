@@ -41,6 +41,30 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     private const REACT_DASHBOARD_CONFIG_ID = 'react_dashboard_config';
 
     /**
+     * Defense-in-depth authentication guard for the standalone tool / dashboard-plugin
+     * renderers in this controller. Every action below is ALREADY protected globally by
+     * MelisCore\Module::checkIdentity() (attached on EVENT_ROUTE), which redirects to
+     * /melis/login or returns 401/404 for any unauthenticated request BEFORE the action
+     * runs. This second, local barrier guarantees a future routing/excluded_routes
+     * regression can never expose a legacy tool renderer to an anonymous caller — it
+     * mirrors the per-action isAuthenticated() check already enforced in
+     * MelisReactApiController. In normal flow it never triggers.
+     *
+     * @return \Laminas\Http\Response|null 401 response when anonymous, null when allowed.
+     */
+    private function denyIfUnauthenticated()
+    {
+        if (!$this->getServiceManager()->get('MelisCoreAuth')->hasIdentity()) {
+            $response = $this->getResponse();
+            $response->setStatusCode(401);
+            $response->setContent('');
+            return $response;
+        }
+
+        return null;
+    }
+
+    /**
      * Returns a complete, self-contained HTML page for a Melis tool zone.
      *
      * The React app loads this URL directly in an <iframe src="...">.  No
@@ -52,6 +76,10 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      */
     public function toolPageAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $request = $this->getRequest();
         $key     = $request->getQuery('key', '');
 
@@ -1026,6 +1054,10 @@ HTML;
 
     public function dashboardPluginPageAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $pluginName = $this->getRequest()->getQuery('plugin', '');
         if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
             $this->getResponse()->setStatusCode(400);
@@ -2856,6 +2888,10 @@ HTML;
      */
     public function dashboardPluginContentAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $pluginName = $this->getRequest()->getQuery('plugin', '');
         if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
             $this->getResponse()->setStatusCode(400);
@@ -2965,6 +3001,10 @@ HTML;
      */
     public function legacyWidgetCssAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $assets = \MelisReactOverride\Service\PlatformAssetsService::build($this->getServiceManager());
         $built  = \MelisReactOverride\Service\LegacyWidgetCssService::build($assets['css'] ?? []);
 
@@ -3097,6 +3137,10 @@ HTML;
      */
     public function dashboardPluginConfigPageAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $pluginName = $this->getRequest()->getQuery('plugin', '');
         if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
             $this->getResponse()->setStatusCode(400);
@@ -3392,6 +3436,10 @@ HTML;
      */
     public function dashboardPluginConfigDataAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $pluginName = $this->getRequest()->getQuery('plugin', '');
         if (!$pluginName || !preg_match('/^[A-Za-z0-9_-]+$/', $pluginName)) {
             $this->getResponse()->setStatusCode(400);
@@ -3486,6 +3534,10 @@ HTML;
 
     public function dashboardPluginConfigSaveAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $request = $this->getRequest();
         if (!$request->isPost()) {
             return new JsonModel(['success' => false, 'error' => 'Method not allowed']);
@@ -3574,6 +3626,10 @@ HTML;
 
     public function generateAction()
     {
+        if ($denied = $this->denyIfUnauthenticated()) {
+            return $denied;
+        }
+
         $result = parent::generateAction();
 
         // Only post-process AJAX JSON responses
