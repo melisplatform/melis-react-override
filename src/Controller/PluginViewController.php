@@ -1150,8 +1150,21 @@ HTML;
             static fn($h) => '  <script src="' . htmlspecialchars(\MelisReactOverride\Service\PlatformAssetsService::bust($h), ENT_QUOTES) . '"></script>',
             $jsRes
         ));
+        // Run each jscallback on jQuery DOM-ready, NOT immediately. The plugin scripts define their
+        // globals INSIDE `$(function(){ window.xxxInit = … })` (e.g. MelisCommerceDashboardPlugin
+        // OrderMessages.js), so those globals only exist once the ready queue fires. An immediate IIFE
+        // here ran BEFORE that → "commerceDashboardPluginOrderMessagesInit is not defined" (ticket
+        // 0010863). jQuery runs ready handlers in registration order: the plugin's `<script src>`
+        // (emitted just above, in $bodyJs) registers its handler first, so wrapping the callback in
+        // jQuery(ready) guarantees the global is defined by the time the callback runs — exactly like
+        // the classic back-office dashboard. `refreshWidget` re-runs these blocks after ready, where
+        // jQuery(fn) executes fn synchronously, so reloads keep working too.
         $callbackBlocks = implode("\n", array_map(
-            static fn($cb) => "<script>\n(function(){\ntry{\n{$cb}\n}catch(e){console.warn(e);}\n})();\n</script>",
+            static fn($cb) => "<script>\n(function(run){\n"
+                . "  if (window.jQuery) { window.jQuery(run); }\n"
+                . "  else if (document.readyState !== 'loading') { run(); }\n"
+                . "  else { document.addEventListener('DOMContentLoaded', run); }\n"
+                . "})(function(){\ntry{\n{$cb}\n}catch(e){console.warn(e);}\n});\n</script>",
             $jsCallBacks
         ));
 
