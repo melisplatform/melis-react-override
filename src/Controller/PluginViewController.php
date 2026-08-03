@@ -4212,7 +4212,14 @@ HTML;
 
     public function generateAction()
     {
-        if ($denied = $this->denyIfUnauthenticated()) {
+        // The login page itself renders through THIS action: MelisAuthController::loginpageAction()
+        // forwards here with appconfigpath=/meliscore_login — that is the one legitimate anonymous
+        // caller (it's how an unauthenticated visitor sees the login form at all). Every other
+        // caller of this generic zone renderer is already gated by MelisCore\Module::checkIdentity()
+        // (attached on EVENT_ROUTE) upstream; this local guard is defense-in-depth for tool-renderer
+        // callers (see denyIfUnauthenticated() docblock), not for the public login zone tree.
+        $appconfigpath = $this->params()->fromRoute('appconfigpath', '');
+        if ($appconfigpath !== '/meliscore_login' && ($denied = $this->denyIfUnauthenticated())) {
             return $denied;
         }
 
