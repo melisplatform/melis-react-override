@@ -64,6 +64,60 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         return null;
     }
 
+    /** Current PHP session id, or '' when no session is active. */
+    private function currentSessionId()
+    {
+        return session_status() === PHP_SESSION_ACTIVE ? (string) session_id() : '';
+    }
+
+    /**
+     * Restores the session id a legacy tool rotated while its zone was being rendered.
+     *
+     * A few legacy tools call `SessionManager::regenerateId()` in their renderToolAction — e.g.
+     * the Dashboard / Templating Plugin Creators, which reuse the fresh id as the name of their
+     * temp-thumbnail folder. Laminas defaults that call to `$deleteOldSession = true`, i.e.
+     * `session_regenerate_id(true)`: the PREVIOUS session file is DELETED.
+     *
+     * In the classic back-office that is harmless — one request at a time, and the new cookie
+     * lands before the next one. Here the tool zone renders inside an IFRAME of the React shell,
+     * while the shell, its bricks and the pollers fire their own requests in parallel. Every one
+     * of them still carries the OLD PHPSESSID, whose file no longer exists → PHP opens an empty
+     * session → `isAuthenticated()` is false → **HTTP 401**, and their `Set-Cookie` overwrites the
+     * good session cookie → the whole tab is logged out and bounced to /melis/login. It is a race,
+     * so it strikes intermittently (typically after the Plugin Creator's post-generation reload,
+     * when the stale tool iframe remounts next to a burst of API calls).
+     *
+     * We therefore re-open the ORIGINAL session id after the zone is rendered, carrying over
+     * everything the tool just wrote (its container included). The session is left OPEN so the
+     * rest of the request behaves normally, and PHP re-emits the cookie with the original id —
+     * after the one `regenerateId()` sent, so the browser keeps the id it already had.
+     *
+     * The legacy tool is untouched: it still gets its unique id, only the auth session survives.
+     */
+    private function pinSessionId($expected)
+    {
+        if ($expected === '' || session_status() !== PHP_SESSION_ACTIVE) {
+            return;
+        }
+        if (session_id() === $expected || headers_sent()) {
+            return;
+        }
+
+        $data = $_SESSION;          // état complet, y compris ce que le tool vient d'écrire
+        session_write_close();      // obligatoire : on ne peut pas changer d'id session active
+        session_id($expected);
+
+        // `regenerateId()` a SUPPRIMÉ le fichier de l'ancien id ; avec use_strict_mode=1 (défaut
+        // durci), PHP refuse de « ressusciter » un id sans fichier et en génère encore un autre.
+        // On le désactive le temps du session_start(), puis on le remet.
+        $strict = ini_get('session.use_strict_mode');
+        ini_set('session.use_strict_mode', '0');
+        session_start();            // recrée le fichier supprimé par regenerateId()
+        ini_set('session.use_strict_mode', (string) $strict);
+
+        $_SESSION = $data;          // écrit en fin de requête, comme d'habitude
+    }
+
     /**
      * Returns a complete, self-contained HTML page for a Melis tool zone.
      *
@@ -103,6 +157,10 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         // full rendering path the classic back-office AJAX calls use.
         $this->getRequest()->getHeaders()->addHeaderLine('X-Requested-With', 'XMLHttpRequest');
 
+        // Some legacy tools rotate the PHP session id while rendering (see pinSessionId()).
+        // Harmless in the classic back-office, fatal here — so we snapshot it first.
+        $pinnedSessionId = $this->currentSessionId();
+
         // ── Render the zone HTML (with inline <script> tags intact) ──────────
         $zoneView = $this->generateRec($keyView, $appConfigPath, $jsCallBacks, []);
         $zoneView->setVariable('zoneconfig', $appsConfig);
@@ -115,6 +173,8 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         }
 
         $html = $this->renderViewRec($zoneView);
+
+        $this->pinSessionId($pinnedSessionId);
 
         // Module-owned HTML adjustments (e.g. MelisAI prepending its shared admin header/save-form
         // to a standalone sub-tab). See PluginViewToolPageExtensionInterface for the contract —
