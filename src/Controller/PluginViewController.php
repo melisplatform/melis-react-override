@@ -1666,11 +1666,21 @@ JS;
     #{$zoneId} .mccom-comment small { color: var(--melis-plugin-muted) !important; }
     /* Pastille « voir le post » (l'œil) : le legacy la peint en `.label-success`, vert vif #72af46 —
        une couleur de STATUT alors que c'est une ACTION, et elle éblouit sur fond sombre à côté du
-       gris #727270 du numéro de commentaire. On la ramène à un vert translucide + icône désaturée,
-       exactement la convention déjà en place pour les pastilles VALIDATED/REFUSED du workflow.
+       gris #727270 du numéro de commentaire. On la repasse donc à l'ACCENT DU THÈME, en pastille
+       translucide (comme les statuts du workflow, mais sur la couleur du thème plutôt que le vert) :
+       le vert cesse de suggérer un statut « validé » et la tuile reste sur une seule couleur.
+       `color-mix` : les tokens d'accent arrivent en `rgb(...)` opaque (cf. `?primary=`), c'est le
+       seul moyen d'en dériver un voile et une version éclaircie SANS coder de couleur en dur — la
+       pastille suit donc automatiquement le thème. La déclaration qui précède sert de repli si le
+       moteur ne connaît pas `color-mix` (elle est alors la seule appliquée : voile neutre + accent).
        Pas de bordure : la pastille garde la taille exacte de sa voisine `#n`. */
     #{$zoneId} .mccom-view-post,
-    #{$zoneId} .mccom-comment .column-media-body .label.mccom-view-post { background: rgba(52,168,95,0.20) !important; background-color: rgba(52,168,95,0.20) !important; color: #4ade80 !important; }
+    #{$zoneId} .mccom-comment .column-media-body .label.mccom-view-post {
+      background: var(--melis-plugin-row-hover) !important;
+      background-color: color-mix(in srgb, var(--melis-plugin-primary) 20%, transparent) !important;
+      color: var(--melis-plugin-primary) !important;
+      color: color-mix(in srgb, var(--melis-plugin-primary) 72%, white) !important;
+    }
     #{$zoneId} .mccom-view-post i { color: inherit !important; }
 
     /* ── Workflow (MelisSmallBusiness) ────────────────────────────────────────────────────────
