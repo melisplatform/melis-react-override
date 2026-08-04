@@ -2191,16 +2191,13 @@ CSS;
        Bootstrap 3 dont plus aucune règle ne subsiste (le module ne style que `.column-media-body`,
        la classe de l'AUTRE vue). Le corps s'habillerait autour du flottant, sauf qu'il contient
        deux `<div class="clearfix">` qui le NETTOIENT : seul le nom reste à côté de l'avatar, le
-       titre/texte/date repartent sous lui. Même traitement, ciblé par `:has()` pour ne pas toucher
-       la variante « row » ci-dessus. */
-    html[data-melis-narrow="1"] li.mccom-comment:has(> .float-left) {
-      display: flex !important;
-      align-items: flex-start;
-      gap: 10px;
-    }
-    html[data-melis-narrow="1"] .mccom-comment > .float-left { float: none !important; flex: 0 0 auto; margin: 0 !important; }
-    html[data-melis-narrow="1"] .mccom-comment > .media-body { flex: 1 1 auto; min-width: 0; }
-    html[data-melis-narrow="1"] .mccom-comment .clearfix { display: none !important; }
+       titre/texte/date repartent sous lui.
+       Son traitement n'est PLUS ici : le défaut ne dépend pas de la largeur (les `clearfix` cassent
+       le flottant à n'importe quelle taille), il vaut donc pour toutes les tuiles et a rejoint la
+       section « Derniers commentaires » du bloc toujours émis, plus haut. Reste ci-dessous ce qui
+       est propre à l'étroit : le `clearfix` de l'AUTRE gabarit (`.row`), inutile une fois ses deux
+       colonnes passées en flex juste au-dessus. */
+    html[data-melis-narrow="1"] .mccom-comment > .row .clearfix { display: none !important; }
     /* ── Commun aux deux variantes : liste sans retrait de puces (l'avatar sert déjà de repère),
        interlignes resserrés, et un filet entre commentaires — une fois les cartes compactées,
        deux commentaires consécutifs se liraient sinon comme un seul bloc. */
@@ -2617,6 +2614,36 @@ CSS;
     /* Le détail dépliable respire et se démarque de la tête. */
     .melissb-dashboard-workflow .dashboard-widget-workflow ul.list li .wd-cont-content { padding: 8px 0 2px !important; border-top: 1px solid var(--melis-plugin-border); }
     .melissb-dashboard-workflow .wd-cont-content p + p { margin-top: 4px !important; }
+
+    /* ── « Derniers commentaires » (MelisCmsComments) : la carte rechargée par AJAX ────────────
+       Le module a DEUX gabarits pour la même liste. Celui du premier rendu (latest-comments.phtml)
+       est une `.row` Bootstrap : le figeage de grille plus haut lui rend ses largeurs
+       `col-xl-1` / `col-xl-11`,
+       donc avatar et texte sont bien côte à côte. Mais dès qu'on change un filtre (site, utilisateur,
+       nombre), la zone est re-rendue par la partielle `list.phtml`, dont le markup est un « media
+       object » Bootstrap 3 : `<div class="float-left">` + `<div class="media-body">`. Plus aucune
+       feuille ne le style (le module ne cible que `.column-media-body`, la classe de l'AUTRE vue) et
+       le corps contient deux `<div class="clearfix">` qui ANNULENT l'habillage du flottant : seul le
+       nom reste à côté de l'avatar, le titre / le texte / la date repartent SOUS lui, à la marge
+       gauche. D'où l'impression de fiches disloquées après un filtrage.
+       On repasse la carte en flex — avatar au strict nécessaire, corps élastique — ce qui donne
+       exactement la mise en page du premier rendu. `:has(> .float-left)` ne vise que ce gabarit :
+       la variante `.row` n'est pas touchée. Ces règles étaient déjà là pour la tuile ÉTROITE
+       (cf. le bloc « tuile étroite », § 10) ; le défaut ne dépend pas de la largeur, elles
+       remontent donc ici.
+       ⚠️ Ne JAMAIS écrire un nom de variable PHP dans ce commentaire : ce gabarit est un heredoc
+       INTERPOLÉ — la variable serait remplacée par tout son contenu CSS, dont le premier
+       délimiteur de fin de commentaire fermerait celui-ci par surprise ; la suite partirait en
+       erreur de parsing et emporterait silencieusement les règles ci-dessous (constaté). */
+    /* `display` en `!important` : le `<li>` reste sinon un `list-item` peint par la cascade legacy,
+       et la carte retombe en pile. */
+    li.mccom-comment:has(> .float-left) { display: flex !important; align-items: flex-start; gap: 10px; }
+    .mccom-comment > .float-left { float: none !important; flex: 0 0 auto; margin: 0 !important; }
+    .mccom-comment > .media-body { flex: 1 1 auto; min-width: 0; }
+    /* Les `clearfix` du corps sont LAISSÉS EN PLACE : plus rien ne flotte, donc leur `clear` ne fait
+       plus rien de nuisible, mais ils restent des blocs vides — ce qui suffit à renvoyer le titre,
+       puis le texte, puis la date à la ligne. On retrouve ainsi la mise en page du premier rendu
+       (nom + pastilles, puis titre, puis extrait, puis date) au lieu de tout enfiler sur une ligne. */
 {$workflowDialogCss}
 {$darkCss}
 {$narrowCss}</style>
