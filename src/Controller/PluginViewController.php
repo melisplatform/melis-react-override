@@ -1664,6 +1664,14 @@ JS;
     #{$zoneId} .mccom-text,
     #{$zoneId} .mccom-text p { color: var(--melis-plugin-fg) !important; }
     #{$zoneId} .mccom-comment small { color: var(--melis-plugin-muted) !important; }
+    /* Pastille « voir le post » (l'œil) : le legacy la peint en `.label-success`, vert vif #72af46 —
+       une couleur de STATUT alors que c'est une ACTION, et elle éblouit sur fond sombre à côté du
+       gris #727270 du numéro de commentaire. On la ramène à un vert translucide + icône désaturée,
+       exactement la convention déjà en place pour les pastilles VALIDATED/REFUSED du workflow.
+       Pas de bordure : la pastille garde la taille exacte de sa voisine `#n`. */
+    #{$zoneId} .mccom-view-post,
+    #{$zoneId} .mccom-comment .column-media-body .label.mccom-view-post { background: rgba(52,168,95,0.20) !important; background-color: rgba(52,168,95,0.20) !important; color: #4ade80 !important; }
+    #{$zoneId} .mccom-view-post i { color: inherit !important; }
 
     /* ── Workflow (MelisSmallBusiness) ────────────────────────────────────────────────────────
        Le module dessine ses onglets HAUTS (« Users' demands » / « My demands ») en pastilles
@@ -1726,6 +1734,11 @@ JS;
        était le seul élément à ne pas suivre. Scopé au bloc du plugin (`:has(.pros-dash-tbl)`) : on ne
        repeint PAS `.text-primary` en bloc, d'autres plugins s'en servent comme couleur de sens. */
     #{$zoneId} .row-merge:has(.pros-dash-tbl) .text-primary { color: var(--melis-plugin-primary) !important; }
+    /* Le NOMBRE lui-même (`.lead .text-large`) : le legacy le laisse au gris de `.lead` (#8b91a0),
+       calibré pour du texte secondaire sur fond blanc — sur le bleu-nuit de la tuile il disparaît
+       presque, alors que c'est LA donnée du KPI. On le remonte à la couleur de texte principale de
+       l'hôte (l'accent reste pour le libellé, à côté). */
+    #{$zoneId} .row-merge:has(.pros-dash-tbl) .lead .text-large { color: var(--melis-plugin-fg) !important; }
 
     /* ── Graphique flot ───────────────────────────────────────────────────────────────────────
        Libellés d'axes / légende : flot pose leur couleur en style INLINE → !important obligatoire. */
