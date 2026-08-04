@@ -1277,6 +1277,12 @@ HTML;
   var original = jq.plot;
   var css = getComputedStyle(document.documentElement);
   var border = (css.getPropertyValue('--melis-plugin-border') || '').trim() || '#3f3f46';
+  /* ⚠️ `grid.tickColor` ne suffit PAS : flot laisse chaque AXE porter son propre `tickColor`, et
+     cette valeur-là gagne sur celle de la grille. Les plugins legacy y codent en dur `#eee`
+     (prospects : xaxis + yaxis) → des traits de grille BLANCS sur fond sombre, très marqués.
+     On repasse donc l'axe (formes `xaxis`/`yaxis` ET `xaxes[]`/`yaxes[]`) sur le même token. */
+  var axis = function(a){ return a ? jq.extend({}, a, { tickColor: border }) : a; };
+  var axes = function(list){ return jq.isArray(list) ? jq.map(list, axis) : list; };
   var patched = function(placeholder, data, options){
     var opts = options || {};
     opts = jq.extend({}, opts, { grid: jq.extend({}, opts.grid || {}, {
@@ -1285,9 +1291,57 @@ HTML;
       borderColor: 'transparent',
       tickColor: border
     })});
+    if (opts.xaxis) opts.xaxis = axis(opts.xaxis);
+    if (opts.yaxis) opts.yaxis = axis(opts.yaxis);
+    if (opts.xaxes) opts.xaxes = axes(opts.xaxes);
+    if (opts.yaxes) opts.yaxes = axes(opts.yaxes);
     return original.call(this, placeholder, data, opts);
   };
   /* flot accroche des propriétés sur $.plot (notamment $.plot.plugins) — les conserver. */
+  jq.extend(patched, original);
+  jq.plot = patched;
+})();
+</script>
+JS;
+
+        // ── Couleur des SÉRIES en mode sombre (plugins listés ci-dessous) ─────────────────────────
+        // Les plugins codent la couleur de leur série EN DUR, avec la palette du BO legacy clair :
+        //   • MelisCmsProspectsStatisticsPlugin (courbe + barres) → `color: successColor`, le vert
+        //     `#8baf46`, et `points.fillColor: "#fff"` pour la courbe ;
+        //   • MelisCommerceDashboardPluginOrdersNumber (courbe)   → `color: "#3997d4"` + le même
+        //     `points.fillColor: "#fff"`.
+        // Sur le fond sombre de la tuile, ça donne une série hors-thème et des pastilles BLANCHES
+        // qui « brûlent ». La couleur est portée par la SÉRIE, pas par la grille : le patch flot
+        // générique ci-dessus ne peut pas la corriger.
+        // On enveloppe donc `$.plot` une seconde fois, pour ces plugins seulement, en repeignant
+        // chaque série avec `--melis-plugin-primary` et le remplissage des points avec le fond de la
+        // tuile (`--melis-plugin-bg`) → pastilles « creuses » lisibles sur sombre.
+        // Corrigé ICI et pas dans les modules : chantier 3 = isolé, le BO legacy (clair) garde ses
+        // couleurs d'origine. Gaté sur `scheme=dark` pour la même raison.
+        // Ajouter un plugin = ajouter son nom à la liste, rien d'autre.
+        $seriesChartPlugins = [
+            'MelisCmsProspectsStatisticsPlugin',
+            'MelisCommerceDashboardPluginOrdersNumber',
+        ];
+        $seriesChartPatch = ($pluginScheme !== 'dark' || !in_array($pluginName, $seriesChartPlugins, true)) ? '' : <<<'JS'
+<script>
+(function(){
+  var jq = window.jQuery;
+  if (!jq || !jq.plot) return;
+  var original = jq.plot;
+  var css = getComputedStyle(document.documentElement);
+  var primary = (css.getPropertyValue('--melis-plugin-primary') || '').trim() || '#2f6bff';
+  var bg      = (css.getPropertyValue('--melis-plugin-bg') || '').trim() || '#0e1626';
+  var patched = function(placeholder, data, options){
+    var series = jq.isArray(data) ? jq.map(data, function(s){
+      if (!s || typeof s !== 'object' || jq.isArray(s)) return s;
+      return jq.extend({}, s, {
+        color: primary,
+        points: jq.extend({}, s.points || {}, { fillColor: bg })
+      });
+    }) : data;
+    return original.call(this, placeholder, series, options);
+  };
   jq.extend(patched, original);
   jq.plot = patched;
 })();
@@ -1362,6 +1416,25 @@ JS;
     #{$zoneId} .list-group,
     #{$zoneId} .list-group-item,
     #{$zoneId} table { background: transparent !important; color: var(--melis-plugin-fg) !important; }
+    /* ⚠️ Rendre la TABLE transparente ne suffit PAS : Bootstrap 5 repeint chaque CELLULE
+       (`.table > :not(caption) > * > * { background-color: var(--bs-table-bg) }`, posé en
+       `--bs-table-bg: #fff` sur `.table`) — d'où des lignes BLANCHES à texte sombre dans une tuile
+       sombre (constaté sur « derniers prospects »). La cellule ayant sa propre déclaration de fond,
+       il faut neutraliser la VARIABLE, pas la table. On remet aussi la couleur de police en
+       héritage : `--bs-table-color` la forcerait au gris legacy. `-accent-bg` couvre le zébrage
+       (`table-striped`) et `-hover-bg` le survol, sinon eux aussi repeignent en clair.
+       Générique : toutes les tables de plugin en profitent, les en-têtes `thead.bg-primary`
+       gardant leur aplat d'accent (règle dédiée plus bas, en `!important`). */
+    #{$zoneId} .table {
+      --bs-table-bg: transparent;
+      --bs-table-color: inherit;
+      --bs-table-accent-bg: transparent;
+      --bs-table-striped-bg: var(--melis-plugin-row-hover);
+      --bs-table-striped-color: inherit;
+      --bs-table-hover-bg: var(--melis-plugin-row-hover);
+      --bs-table-hover-color: inherit;
+      --bs-table-border-color: var(--melis-plugin-border);
+    }
 
     /* ── « Page indicators » (MelisCms) : tuiles colorées, version sombre ──────────────────────
        Les 4 tuiles combinent `.innerAll` (repassé transparent juste au-dessus) AVEC une classe
@@ -1538,6 +1611,60 @@ JS;
     #{$zoneId} .pagination .page-link { color: var(--melis-plugin-primary) !important; background-color: transparent !important; border-color: var(--melis-plugin-border) !important; }
     #{$zoneId} .pagination .page-item.disabled .page-link { color: var(--melis-plugin-muted) !important; }
 
+    /* ── Onglets `widget-tabs` : la pastille BLANCHE de l'onglet actif ────────────────────────
+       `.widget.widget-tabs > .widget-head ul li.active { background:#fff }` (bundle.css) peint le
+       `<li>`, pas le `<a>` — les règles `.nav-link.active` plus haut ne l'atteignent donc PAS et le
+       carré blanc subsiste autour de l'icône (symptôme vu sur « Latest comments »). On neutralise
+       le `<li>` : l'état actif se lit alors au fond de survol du `<a>` + son soulignement d'accent.
+       Généralise ce que `.dashboard-workflow-tabs` corrigeait déjà au cas par cas. */
+    #{$zoneId} .widget.widget-tabs > .widget-head ul li.active,
+    #{$zoneId} .widget-tabs .nav-tabs > li.active { background: transparent !important; border-color: var(--melis-plugin-border) !important; }
+
+    /* ── Champs de formulaire (`.form-control`) ───────────────────────────────────────────────
+       Bootstrap les peint en BLANC à texte sombre : dans une tuile sombre, les filtres (listes
+       déroulantes des plugins, ex. « Latest comments » : site / utilisateur / nombre) restent des
+       rectangles blancs. On les repasse en surface discrète du thème. `option` est repeint à part :
+       le menu natif déroulé ne suit pas le fond du `<select>`. */
+    #{$zoneId} .form-control,
+    #{$zoneId} select.form-control,
+    #{$zoneId} textarea.form-control { background-color: var(--melis-plugin-row-hover) !important; color: var(--melis-plugin-fg) !important; border-color: var(--melis-plugin-border) !important; }
+    #{$zoneId} .form-control::placeholder { color: var(--melis-plugin-muted) !important; }
+    #{$zoneId} .form-control option { background-color: var(--melis-plugin-bg) !important; color: var(--melis-plugin-fg) !important; }
+
+    /* ── select2 ──────────────────────────────────────────────────────────────────────────────
+       Quand le plugin trouve `$.fn.select2`, le `<select>` natif est REMPLACÉ par le markup select2
+       (le natif passe en `select2-hidden-accessible`) : styler `.form-control` ne suffit plus.
+       NON scopé à `#{$zoneId}` : select2 accroche sa liste déroulante au `<body>`, hors du wrapper
+       de zone (même raison que le tooltip legacy plus bas). */
+    .select2-container { background: transparent !important; }
+    .select2-container--default .select2-selection--single { background-color: var(--melis-plugin-row-hover) !important; border-color: var(--melis-plugin-border) !important; }
+    .select2-container--default .select2-selection--single .select2-selection__rendered { color: var(--melis-plugin-fg) !important; }
+    .select2-container--default .select2-selection--single .select2-selection__placeholder { color: var(--melis-plugin-muted) !important; }
+    .select2-container--default .select2-selection--single .select2-selection__arrow b { border-top-color: var(--melis-plugin-fg) !important; }
+    .select2-dropdown { background-color: var(--melis-plugin-bg) !important; border-color: var(--melis-plugin-border) !important; color: var(--melis-plugin-fg) !important; }
+    .select2-container--default .select2-results__option { color: var(--melis-plugin-fg) !important; background-color: transparent !important; }
+    .select2-container--default .select2-results__option--highlighted[aria-selected],
+    .select2-container--default .select2-results__option[aria-selected="true"] { background-color: var(--melis-plugin-row-hover) !important; color: var(--melis-plugin-fg) !important; }
+    .select2-container--default .select2-search--dropdown .select2-search__field { background-color: var(--melis-plugin-row-hover) !important; color: var(--melis-plugin-fg) !important; border-color: var(--melis-plugin-border) !important; }
+
+    /* ── Latest comments (MelisCmsComments) ───────────────────────────────────────────────────
+       Ce qui reste codé en clair dans la feuille du plugin (dashboardLatestPlugin.css) :
+         • l'icône de l'onglet actif en ROUGE Melis (#e61c23) → accent du thème, comme ailleurs ;
+         • la vignette « pas de photo » en gris clair #dbdbdb (+ son bonhomme #8f8f8f) → surface
+           discrète + gris atténué du thème ;
+         • le texte du commentaire (nom, titre du post, date), hérité du legacy en tons sombres.
+       Les deux gabarits de liste du module sont couverts : celui de `latest-comments.phtml`
+       (`.row` + `.column-media-body`) ET celui de `list.phtml` (rechargement de la seule liste au
+       changement du filtre « nombre »), qui n'ont pas exactement les mêmes classes. */
+    #{$zoneId} .mccom-dashboard-latest-heading .widget-head ul li.active > a i:before { color: var(--melis-plugin-primary) !important; }
+    #{$zoneId} span.mccom-no-photo { background: var(--melis-plugin-row-hover) !important; border: 1px solid var(--melis-plugin-border) !important; }
+    #{$zoneId} .mccom-no-photo i.fa.fa-user { color: var(--melis-plugin-muted) !important; }
+    #{$zoneId} .mccom-comment .media-heading,
+    #{$zoneId} .mccom-comment strong,
+    #{$zoneId} .mccom-text,
+    #{$zoneId} .mccom-text p { color: var(--melis-plugin-fg) !important; }
+    #{$zoneId} .mccom-comment small { color: var(--melis-plugin-muted) !important; }
+
     /* ── Workflow (MelisSmallBusiness) ────────────────────────────────────────────────────────
        Le module dessine ses onglets HAUTS (« Users' demands » / « My demands ») en pastilles
        PLEINES : gris `#ECEBEB` inactif, `#72af46` vert actif (style.css), et le thème legacy colore
@@ -1591,6 +1718,14 @@ JS;
        l'accent du thème (bleu Studio) pour la cohérence avec le reste des tuiles. `#{$zoneId}` (id)
        l'emporte sur le sélecteur de classe seule du legacy. */
     #{$zoneId} .ra-username { color: var(--melis-plugin-primary) !important; }
+
+    /* ── KPI « N Prospects » (MelisCmsProspects) ───────────────────────────────────────────────
+       Même traitement que ci-dessus : l'icône (`.icon-graph-up-1.fa-4x`) et le libellé portent
+       `.text-primary`, que le legacy peint en ROUGE Melis. En sombre, la tuile affiche déjà l'accent
+       du thème hôte sur l'en-tête de table et les boutons Daily/Monthly/Yearly — ce rouge orphelin
+       était le seul élément à ne pas suivre. Scopé au bloc du plugin (`:has(.pros-dash-tbl)`) : on ne
+       repeint PAS `.text-primary` en bloc, d'autres plugins s'en servent comme couleur de sens. */
+    #{$zoneId} .row-merge:has(.pros-dash-tbl) .text-primary { color: var(--melis-plugin-primary) !important; }
 
     /* ── Graphique flot ───────────────────────────────────────────────────────────────────────
        Libellés d'axes / légende : flot pose leur couleur en style INLINE → !important obligatoire. */
@@ -2573,6 +2708,7 @@ CSS;
 <div id="melis-modals-container"></div>
 {$bodyJs}
 {$flotPatch}
+{$seriesChartPatch}
 {$orderMessagesPatch}
 {$callbackBlocks}
 <script>
