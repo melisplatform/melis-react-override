@@ -1261,7 +1261,7 @@ HTML;
             }
         }
 
-        // ── Graphiques flot en mode sombre ────────────────────────────────────────────────────────
+        // ── Graphiques flot : grille et fond alignés sur le thème de l'hôte ───────────────────────
         // AUCUNE règle CSS ne peut repeindre le fond d'un graphique flot : il est PEINT DANS LE
         // CANVAS (les plugins codent en dur `grid.backgroundColor = { colors: ["#fff","#fff"] }`).
         // On enveloppe donc `$.plot` pour neutraliser ce fond et réaligner grille et bordures sur les
@@ -1269,21 +1269,33 @@ HTML;
         // Émis APRÈS les scripts du plugin (qui définissent `$.plot`) et AVANT les callbacks (qui
         // l'appellent). Le patch survit aux rechargements internes : `refreshWidget` réévalue les
         // callbacks, mais `$.plot` reste enveloppé.
-        $flotPatch = $pluginScheme !== 'dark' ? '' : <<<'JS'
+        // ⚠️ Le patch reste réservé au mode SOMBRE (en clair, le rendu legacy est déjà bon), mais ce
+        // mode est désormais lu À CHAQUE APPEL sur `data-melis-scheme`, plus au chargement. Le thème
+        // bascule à CHAUD (`__melisRetheme`, sans recharger l'iframe) : gaté au chargement, le patch
+        // restait figé — un graphe tracé en sombre gardait sa grille sombre après passage en clair, et
+        // un document chargé en clair n'avait aucun patch à activer en passant en sombre. Décider (et
+        // relire les tokens) au moment du tracé rend le patch valable dans les deux sens — cf. le
+        // re-tracé sur `__melisRetheme` plus bas, qui fournit l'occasion de retracer.
+        $flotPatch = <<<'JS'
 <script>
 (function(){
   var jq = window.jQuery;
   if (!jq || !jq.plot) return;
   var original = jq.plot;
-  var css = getComputedStyle(document.documentElement);
-  var border = (css.getPropertyValue('--melis-plugin-border') || '').trim() || '#3f3f46';
-  /* ⚠️ `grid.tickColor` ne suffit PAS : flot laisse chaque AXE porter son propre `tickColor`, et
-     cette valeur-là gagne sur celle de la grille. Les plugins legacy y codent en dur `#eee`
-     (prospects : xaxis + yaxis) → des traits de grille BLANCS sur fond sombre, très marqués.
-     On repasse donc l'axe (formes `xaxis`/`yaxis` ET `xaxes[]`/`yaxes[]`) sur le même token. */
-  var axis = function(a){ return a ? jq.extend({}, a, { tickColor: border }) : a; };
-  var axes = function(list){ return jq.isArray(list) ? jq.map(list, axis) : list; };
+  var isDark = function(){ return document.documentElement.getAttribute('data-melis-scheme') === 'dark'; };
+  var token = function(name, fallback){
+    var v = (getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim();
+    return v || fallback;
+  };
   var patched = function(placeholder, data, options){
+    if (!isDark()) return original.apply(this, arguments); /* clair = rendu legacy d'origine */
+    var border = token('--melis-plugin-border', '#3f3f46');
+    /* ⚠️ `grid.tickColor` ne suffit PAS : flot laisse chaque AXE porter son propre `tickColor`, et
+       cette valeur-là gagne sur celle de la grille. Les plugins legacy y codent en dur `#eee`
+       (prospects : xaxis + yaxis) → des traits de grille BLANCS sur fond sombre, très marqués.
+       On repasse donc l'axe (formes `xaxis`/`yaxis` ET `xaxes[]`/`yaxes[]`) sur le même token. */
+    var axis = function(a){ return a ? jq.extend({}, a, { tickColor: border }) : a; };
+    var axes = function(list){ return jq.isArray(list) ? jq.map(list, axis) : list; };
     var opts = options || {};
     opts = jq.extend({}, opts, { grid: jq.extend({}, opts.grid || {}, {
       backgroundColor: null, /* ← le fond blanc peint dans le canvas */
@@ -1304,7 +1316,7 @@ HTML;
 </script>
 JS;
 
-        // ── Couleur des SÉRIES en mode sombre (plugins listés ci-dessous) ─────────────────────────
+        // ── Couleur des SÉRIES (plugins listés ci-dessous) ────────────────────────────────────────
         // Les plugins codent la couleur de leur série EN DUR, avec la palette du BO legacy clair :
         //   • MelisCmsProspectsStatisticsPlugin (courbe + barres) → `color: successColor`, le vert
         //     `#8baf46`, et `points.fillColor: "#fff"` pour la courbe ;
@@ -1317,22 +1329,32 @@ JS;
         // chaque série avec `--melis-plugin-primary` et le remplissage des points avec le fond de la
         // tuile (`--melis-plugin-bg`) → pastilles « creuses » lisibles sur sombre.
         // Corrigé ICI et pas dans les modules : chantier 3 = isolé, le BO legacy (clair) garde ses
-        // couleurs d'origine. Gaté sur `scheme=dark` pour la même raison.
+        // couleurs d'origine. Réservé au mode SOMBRE pour la même raison : en clair, la série garde
+        // sa couleur d'origine (vert Prospects, bleu Orders number) — c'est le rendu attendu.
+        // ⚠️ Comme le patch de grille ci-dessus : le mode est lu À CHAQUE APPEL (`data-melis-scheme`),
+        // plus au chargement, et les tokens avec lui. Gaté au chargement, la courbe restait figée sur
+        // la couleur du thème de départ (symptôme : graphe encore « sombre/bleu » après passage en
+        // clair, et série legacy inchangée après passage en sombre).
         // Ajouter un plugin = ajouter son nom à la liste, rien d'autre.
         $seriesChartPlugins = [
             'MelisCmsProspectsStatisticsPlugin',
             'MelisCommerceDashboardPluginOrdersNumber',
         ];
-        $seriesChartPatch = ($pluginScheme !== 'dark' || !in_array($pluginName, $seriesChartPlugins, true)) ? '' : <<<'JS'
+        $seriesChartPatch = !in_array($pluginName, $seriesChartPlugins, true) ? '' : <<<'JS'
 <script>
 (function(){
   var jq = window.jQuery;
   if (!jq || !jq.plot) return;
   var original = jq.plot;
-  var css = getComputedStyle(document.documentElement);
-  var primary = (css.getPropertyValue('--melis-plugin-primary') || '').trim() || '#2f6bff';
-  var bg      = (css.getPropertyValue('--melis-plugin-bg') || '').trim() || '#0e1626';
+  var isDark = function(){ return document.documentElement.getAttribute('data-melis-scheme') === 'dark'; };
+  var token = function(name, fallback){
+    var v = (getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim();
+    return v || fallback;
+  };
   var patched = function(placeholder, data, options){
+    if (!isDark()) return original.apply(this, arguments); /* clair = couleur d'origine de la série */
+    var primary = token('--melis-plugin-primary', '#2f6bff');
+    var bg      = token('--melis-plugin-bg', '#0e1626');
     var series = jq.isArray(data) ? jq.map(data, function(s){
       if (!s || typeof s !== 'object' || jq.isArray(s)) return s;
       return jq.extend({}, s, {
@@ -1344,6 +1366,58 @@ JS;
   };
   jq.extend(patched, original);
   jq.plot = patched;
+})();
+</script>
+JS;
+
+        // ── Re-tracé des graphiques flot lors d'une bascule de thème à chaud ──────────────────────
+        // Un graphe flot vit dans un <canvas> : aucune variable CSS ne le repeint. Les deux patchs
+        // ci-dessus relisent bien les tokens, mais SEULEMENT quand `$.plot` est rappelé — sans ça, la
+        // bascule clair/sombre (qui ne recharge plus l'iframe) laissait le canvas peint avec les
+        // couleurs de l'ancien thème (grille sombre + courbe d'accent figée sur fond clair).
+        // On mémorise donc le DERNIER appel `$.plot` par conteneur (arguments BRUTS du plugin, ce
+        // wrapper étant le plus externe) et on rejoue ces appels sur `__melisRetheme` : ils
+        // retraversent les patchs, qui relisent les tokens fraîchement posés.
+        // Le listener qui écrit ces variables est enregistré dans le <head>, donc AVANT celui-ci :
+        // les nouvelles valeurs sont déjà en place quand on re-trace (au frame suivant, le temps que
+        // le style soit recalculé).
+        $flotRethemePatch = <<<'JS'
+<script>
+(function(){
+  var jq = window.jQuery;
+  if (!jq || !jq.plot) return;
+  var original = jq.plot;
+  var plots = [];
+  var patched = function(placeholder, data, options){
+    var el = placeholder && placeholder.jquery ? placeholder[0] : placeholder;
+    if (el && el.nodeType === 1) {
+      var known = null;
+      for (var i = 0; i < plots.length; i++) { if (plots[i].el === el) { known = plots[i]; break; } }
+      if (!known) { known = { el: el }; plots.push(known); }
+      known.data = data;
+      known.options = options;
+    }
+    return original.apply(this, arguments);
+  };
+  jq.extend(patched, original);
+  jq.plot = patched;
+  var redraw = function(){
+    for (var i = plots.length - 1; i >= 0; i--) {
+      var p = plots[i];
+      /* Conteneur retiré du DOM (widget rechargé) : on oublie l'entrée. */
+      if (!document.body.contains(p.el)) { plots.splice(i, 1); continue; }
+      /* Conteneur masqué / sans dimensions : flot lèverait « non-finite value ». Il sera de toute
+         façon re-tracé par le plugin à son prochain affichage. */
+      if (!p.el.offsetWidth || !p.el.offsetHeight) continue;
+      try { jq.plot(jq(p.el), p.data, p.options); } catch (e) { console.warn(e); }
+    }
+  };
+  window.addEventListener('message', function(e){
+    var d = e && e.data;
+    if (!d || !d.__melisRetheme) return;
+    if (window.requestAnimationFrame) window.requestAnimationFrame(redraw);
+    else setTimeout(redraw, 0);
+  });
 })();
 </script>
 JS;
@@ -1497,6 +1571,13 @@ JS;
     /* Onglets à icône « glyphicons » (police, donc couleur pilotable en CSS) : icône atténuée au
        repos, accent quand l'onglet est actif. Le rouge Melis (#e61c23) du legacy est ainsi remplacé. */
     #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons i:before { color: var(--melis-plugin-muted) !important; }
+    /* Le legacy embosse l'icône d'onglet avec un liseré BLANC 1px vers le bas
+       (`.widget.widget-tabs > .widget-head ul li a i:before { text-shadow: 0 1px 0 #fff }`, bundle.css).
+       Invisible sur fond clair, il devient sur fond sombre une COPIE blanche décalée du glyphe —
+       l'icône paraît dessinée deux fois. On supprime l'emboss (les glyphes eux-mêmes gardent leur
+       couleur de thème définie ci-dessus). */
+    #{$zoneId} .widget.widget-tabs > .widget-head ul li a i:before,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a i:before { text-shadow: none !important; }
     /* Actif : Bootstrap 5 déplace `.active` du `<li>` vers le `<a>` (`.nav-link.active`) à l'exécution
        — on vise donc les DEUX formes (`li.active > a.glyphicons` ET `a.glyphicons.active`), sinon la
        règle « au repos » ci-dessus (plus spécifique que la générique) l'emporterait et le texte
@@ -2191,13 +2272,20 @@ CSS;
        Bootstrap 3 dont plus aucune règle ne subsiste (le module ne style que `.column-media-body`,
        la classe de l'AUTRE vue). Le corps s'habillerait autour du flottant, sauf qu'il contient
        deux `<div class="clearfix">` qui le NETTOIENT : seul le nom reste à côté de l'avatar, le
-       titre/texte/date repartent sous lui.
-       Son traitement n'est PLUS ici : le défaut ne dépend pas de la largeur (les `clearfix` cassent
-       le flottant à n'importe quelle taille), il vaut donc pour toutes les tuiles et a rejoint la
-       section « Derniers commentaires » du bloc toujours émis, plus haut. Reste ci-dessous ce qui
-       est propre à l'étroit : le `clearfix` de l'AUTRE gabarit (`.row`), inutile une fois ses deux
-       colonnes passées en flex juste au-dessus. */
-    html[data-melis-narrow="1"] .mccom-comment > .row .clearfix { display: none !important; }
+       titre/texte/date repartent sous lui. Même traitement, ciblé par `:has()` pour ne pas toucher
+       la variante « row » ci-dessus.
+       ⚠️ Volontairement limité à l'ÉTROIT : sur une tuile de bureau, on veut le rendu TEL QUEL du
+       BO legacy, disloqué ou non — la parité avec l'ancien back-office prime ici sur l'esthétique
+       (décision produit, cf. l'aller-retour de la session du 2026-08-04). Ne pas « remonter » ces
+       règles dans le bloc toujours émis sans redemander. */
+    html[data-melis-narrow="1"] li.mccom-comment:has(> .float-left) {
+      display: flex !important;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    html[data-melis-narrow="1"] .mccom-comment > .float-left { float: none !important; flex: 0 0 auto; margin: 0 !important; }
+    html[data-melis-narrow="1"] .mccom-comment > .media-body { flex: 1 1 auto; min-width: 0; }
+    html[data-melis-narrow="1"] .mccom-comment .clearfix { display: none !important; }
     /* ── Commun aux deux variantes : liste sans retrait de puces (l'avatar sert déjà de repère),
        interlignes resserrés, et un filet entre commentaires — une fois les cartes compactées,
        deux commentaires consécutifs se liraient sinon comme un seul bloc. */
@@ -2284,8 +2372,9 @@ CSS;
      plusieurs secondes à chaque bascule clair/sombre. Il pousse désormais les tokens ici. On met à
      jour les 5 variables CSS de surface + l'attribut de scheme (qui pilote le bloc de surcharges
      sombres et le survol de ligne) : tout le rendu CSS suit instantanément, aucun rechargement.
-     ⚠️ Les graphiques flot sont peints dans un <canvas> : ils ne se recolorent pas par CSS. Limite
-     connue de cette v1 (le fond/la grille du graphe ne suivent qu'au prochain redraw). */
+     ⚠️ Les graphiques flot sont peints dans un <canvas> : ils ne se recolorent pas par CSS. C'est le
+     wrapper de re-thème flot émis plus bas qui les RE-TRACE sur ce même message, une fois les
+     variables ci-dessous écrites — d'où l'ordre : ce listener-ci est enregistré en premier. */
   try {
     window.addEventListener('message', function(e){
       var d = e && e.data;
@@ -2614,36 +2703,6 @@ CSS;
     /* Le détail dépliable respire et se démarque de la tête. */
     .melissb-dashboard-workflow .dashboard-widget-workflow ul.list li .wd-cont-content { padding: 8px 0 2px !important; border-top: 1px solid var(--melis-plugin-border); }
     .melissb-dashboard-workflow .wd-cont-content p + p { margin-top: 4px !important; }
-
-    /* ── « Derniers commentaires » (MelisCmsComments) : la carte rechargée par AJAX ────────────
-       Le module a DEUX gabarits pour la même liste. Celui du premier rendu (latest-comments.phtml)
-       est une `.row` Bootstrap : le figeage de grille plus haut lui rend ses largeurs
-       `col-xl-1` / `col-xl-11`,
-       donc avatar et texte sont bien côte à côte. Mais dès qu'on change un filtre (site, utilisateur,
-       nombre), la zone est re-rendue par la partielle `list.phtml`, dont le markup est un « media
-       object » Bootstrap 3 : `<div class="float-left">` + `<div class="media-body">`. Plus aucune
-       feuille ne le style (le module ne cible que `.column-media-body`, la classe de l'AUTRE vue) et
-       le corps contient deux `<div class="clearfix">` qui ANNULENT l'habillage du flottant : seul le
-       nom reste à côté de l'avatar, le titre / le texte / la date repartent SOUS lui, à la marge
-       gauche. D'où l'impression de fiches disloquées après un filtrage.
-       On repasse la carte en flex — avatar au strict nécessaire, corps élastique — ce qui donne
-       exactement la mise en page du premier rendu. `:has(> .float-left)` ne vise que ce gabarit :
-       la variante `.row` n'est pas touchée. Ces règles étaient déjà là pour la tuile ÉTROITE
-       (cf. le bloc « tuile étroite », § 10) ; le défaut ne dépend pas de la largeur, elles
-       remontent donc ici.
-       ⚠️ Ne JAMAIS écrire un nom de variable PHP dans ce commentaire : ce gabarit est un heredoc
-       INTERPOLÉ — la variable serait remplacée par tout son contenu CSS, dont le premier
-       délimiteur de fin de commentaire fermerait celui-ci par surprise ; la suite partirait en
-       erreur de parsing et emporterait silencieusement les règles ci-dessous (constaté). */
-    /* `display` en `!important` : le `<li>` reste sinon un `list-item` peint par la cascade legacy,
-       et la carte retombe en pile. */
-    li.mccom-comment:has(> .float-left) { display: flex !important; align-items: flex-start; gap: 10px; }
-    .mccom-comment > .float-left { float: none !important; flex: 0 0 auto; margin: 0 !important; }
-    .mccom-comment > .media-body { flex: 1 1 auto; min-width: 0; }
-    /* Les `clearfix` du corps sont LAISSÉS EN PLACE : plus rien ne flotte, donc leur `clear` ne fait
-       plus rien de nuisible, mais ils restent des blocs vides — ce qui suffit à renvoyer le titre,
-       puis le texte, puis la date à la ligne. On retrouve ainsi la mise en page du premier rendu
-       (nom + pastilles, puis titre, puis extrait, puis date) au lieu de tout enfiler sur une ligne. */
 {$workflowDialogCss}
 {$darkCss}
 {$narrowCss}</style>
@@ -2759,6 +2818,7 @@ CSS;
 {$bodyJs}
 {$flotPatch}
 {$seriesChartPatch}
+{$flotRethemePatch}
 {$orderMessagesPatch}
 {$callbackBlocks}
 <script>
@@ -3587,6 +3647,43 @@ CSS;
     var path = '/melis-cms/page/' + pageId;
     var host = window.__melisRealParent || window.parent;
     try { if (host && host !== window) host.postMessage({ __melisOpenTool: true, path: path, label: label }, '*'); } catch (err) {}
+  }, true);
+})();
+</script>
+<script>
+/* ── Plugin « Derniers commentaires » (MelisCmsComments) : ouvrir le post commenté ─────────────
+   L'œil de chaque commentaire (`.mccom-view-post`) est câblé par dashboardLatestPlugin.js sur
+   `melisHelper.tabOpen(...)` : dans le BO legacy il ouvre l'outil du post (Actualités), puis
+   l'article, puis bascule sur son onglet « Commentaires ». Ici ce handler ne peut ouvrir un onglet
+   que dans le document de SON iframe — et il commence par chercher l'outil dans la barre d'onglets,
+   qui n'est qu'un strip factice → le clic ne faisait tout simplement RIEN.
+   Même pont que les deux plugins ci-dessus : on intercepte en capture (avant le handler jQuery
+   délégué sur `body`) et on demande à l'hôte d'ouvrir l'outil en vrai onglet. Le formulaire React
+   des actualités affiche ses commentaires DANS la page (pas d'onglet séparé) : ouvrir
+   `/melis-cms/news/:id` suffit donc à reproduire la destination du legacy.
+   La table de routes est volontairement explicite : le plugin est générique (un onglet par type de
+   post déclaré par les modules), et seuls les types ayant une route React sont détournés — pour un
+   type non mappé on laisse filer le handler legacy, inoffensif, plutôt que d'inventer une URL.
+   Le garde porte sur le CONTENEUR et non sur `.mccom-view-post` : la liste est re-rendue en AJAX à
+   chaque changement de filtre, elle peut être vide au chargement et peuplée ensuite. */
+(function(){
+  if (!document.querySelector('.melis-cms-comments-dashboard-latest-comments')) return;
+  var ROUTE_BY_POST_TYPE = {
+    'news': '/melis-cms/news'
+  };
+  document.addEventListener('click', function(e){
+    var eye = e.target && e.target.closest ? e.target.closest('.mccom-view-post') : null;
+    if (!eye) return;
+    var base = ROUTE_BY_POST_TYPE[eye.getAttribute('data-post-type')];
+    var postId = eye.getAttribute('data-post-id');
+    if (!base || !postId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    /* Le titre du post est déjà sur l'élément → l'onglet s'ouvre avec le bon libellé du premier
+       coup (pas de « News N » qui clignote avant renommage). */
+    var label = eye.getAttribute('data-post-title') || null;
+    var host = window.__melisRealParent || window.parent;
+    try { if (host && host !== window) host.postMessage({ __melisOpenTool: true, path: base + '/' + postId, label: label }, '*'); } catch (err) {}
   }, true);
 })();
 </script>
