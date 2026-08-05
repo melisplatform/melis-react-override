@@ -142,6 +142,10 @@ return [
                     // Lecture publique du thème React (branding du panneau gauche du login,
                     // affiché AVANT authentification). Seul le GET est exclu ; le /save reste protégé.
                     'melis-backoffice/melis-react-api/platformscheme-react-get',
+                    // Langues du BO : le SPA les charge au boot, y compris sur l'écran de LOGIN
+                    // (sélecteur de langue) — avant authentification. Sans exclusion, checkIdentity
+                    // renvoyait 401 en console au chargement du login (ticket 0010874). Lecture seule.
+                    'melis-backoffice/melis-react-api/langs',
                 ],
             ],
         ],
