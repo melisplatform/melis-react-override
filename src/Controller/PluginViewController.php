@@ -1018,6 +1018,7 @@ HTML;
         }
 
         $html = $this->hoistPluginConfigDatas($html);
+        $html = $this->addLegacyPluginIdClass($html, $appsConfig);
 
         $jsCallBacks = array_values(array_unique($jsCallBacks));
 
@@ -1585,6 +1586,22 @@ JS;
     #{$zoneId} .widget-tabs .nav-tabs > li.active > a.glyphicons i:before,
     #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons.active i:before,
     #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons:hover i:before { color: var(--melis-plugin-primary) !important; }
+    /* Onglets à icône SVG — ce que génère désormais le Dashboard Plugin Creator : il écrit dans la
+       vue le TRACÉ montré par son sélecteur (cf. `dashboardTabIconSvg`) plutôt qu'une classe de
+       police, seule façon d'obtenir sur l'onglet exactement l'icône cochée à la création.
+       Le SVG est en `stroke="currentColor"` → il suffit de piloter la couleur du lien, avec la même
+       progression atténué → accent que les onglets glyphicons ci-dessus. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a:has(> svg) { color: var(--melis-plugin-muted) !important; }
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a:has(> svg),
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.active:has(> svg),
+    #{$zoneId} .widget-tabs .nav-tabs > li > a:hover:has(> svg) { color: var(--melis-plugin-primary) !important; }
+    /* Un SVG inline s'aligne sur la ligne de base et « pend » sous la ligne : on le recentre. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a > svg { vertical-align: middle !important; }
+    /* Onglets à icône FONT-AWESOME : repli du générateur pour une clé sans tracé connu. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a > i.fa { color: var(--melis-plugin-muted) !important; }
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a > i.fa,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.active > i.fa,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a:hover > i.fa { color: var(--melis-plugin-primary) !important; }
     /* Le glyphe « file » de Glyphicons (\\E037) dessine sa PAGE en BLANC dans la police elle-même —
        aucun CSS ne peut recolorer une portion d'un glyphe, et son fond `<i>` est bien transparent
        (confirmé au DevTools). On abandonne donc la police : on VIDE le glyphe (`content:""`) et on
@@ -4332,6 +4349,61 @@ HTML;
      * Générique : on ne connaît pas les noms d'options des plugins, mais on sait que la racine
      * porte la structure (conf/datas/forward/plugin_id…) et `datas` les valeurs.
      */
+    /**
+     * Rétablit sur le conteneur legacy la classe CSS que le dashboard CLASSIQUE lui donne.
+     *
+     * `plugin-container.phtml` dérive une classe du `plugin_id` :
+     *     strtolower(explode('_', preg_replace('/(?<!^)([A-Z])/', '-$1', $pluginId))[0])
+     *
+     * En legacy, MelisCoreDashboardTemplatingPlugin fabrique ce `plugin_id` à partir de
+     * `datas['plugin_id']` suffixé d'un timestamp ("AverageOpportunityWon_1748…") — d'où le
+     * `explode('_')[0]`, qui retire le suffixe → classe `average-opportunity-won`.
+     *
+     * Ici on rend le plugin en passant `plugin_id = $pluginName` (le nom du controller-plugin,
+     * "AverageOpportunityWonPlugin"), car c'est cette clé qui indexe les nœuds de config
+     * sauvegardés côté React (ligne react_dashboard_config) : on ne peut pas la changer sans
+     * casser la relecture des réglages. Mais la classe dérivée devient alors
+     * `average-opportunity-won-PLUGIN`, et tout JS de plugin qui se scope dessus ne matche plus :
+     *     $('div.grid-stack-item.grid-stack-animate.average-opportunity-won')   // ← 0 élément
+     * → le callback ne s'exécute jamais (ex. `initSelect()` de NehsDashboardPlugins, qui remplace
+     * les `<select multiple>` par des MultiCheckBox) et le widget garde une mise en page brute.
+     *
+     * On AJOUTE donc le token legacy à côté de celui déjà présent (on ne remplace pas : du JS
+     * pourrait cibler l'un ou l'autre). Sans `datas['plugin_id']`, ou si le token est déjà là,
+     * on ne touche à rien.
+     *
+     * Pendant du côté dashboard CLASSIQUE : MelisReactApiController::dashboardLayoutAction()
+     * écrit un `plugin_id` à la convention legacy dans le record partagé, pour que la classe y
+     * soit correcte elle aussi.
+     */
+    private function addLegacyPluginIdClass(?string $html, array $appsConfig): ?string
+    {
+        $pluginId = $appsConfig['datas']['plugin_id'] ?? '';
+        if ($html === null || !is_string($pluginId) || $pluginId === '') {
+            return $html;
+        }
+
+        // Même dérivation que plugin-container.phtml.
+        $legacyClass = strtolower(explode('_', preg_replace('/(?<!^)([A-Z])/', '-\\1', $pluginId))[0]);
+        if ($legacyClass === '') {
+            return $html;
+        }
+
+        return preg_replace_callback(
+            '#<div\s[^>]*class="([^"]*\bgrid-stack-item\b[^"]*)"#',
+            function (array $m) use ($legacyClass) {
+                $classes = preg_split('/\s+/', trim($m[1])) ?: [];
+                if (in_array($legacyClass, $classes, true)) {
+                    return $m[0];
+                }
+
+                return str_replace('class="' . $m[1] . '"', 'class="' . $m[1] . ' ' . $legacyClass . '"', $m[0]);
+            },
+            $html,
+            1
+        );
+    }
+
     private function hoistPluginConfigDatas(?string $html): ?string
     {
         if ($html === null || !str_contains($html, 'dashboard-plugin-json-config')) {
