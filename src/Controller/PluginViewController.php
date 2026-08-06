@@ -1018,6 +1018,8 @@ HTML;
         }
 
         $html = $this->hoistPluginConfigDatas($html);
+        $html = $this->addLegacyPluginIdClass($html, $appsConfig);
+        $html = $this->svgifyGeneratedTabIcons($html);
 
         $jsCallBacks = array_values(array_unique($jsCallBacks));
 
@@ -1585,6 +1587,35 @@ JS;
     #{$zoneId} .widget-tabs .nav-tabs > li.active > a.glyphicons i:before,
     #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons.active i:before,
     #{$zoneId} .widget-tabs .nav-tabs > li > a.glyphicons:hover i:before { color: var(--melis-plugin-primary) !important; }
+    /* Onglets à icône SVG — ce que génère désormais le Dashboard Plugin Creator : il écrit dans la
+       vue le TRACÉ montré par son sélecteur (cf. `dashboardTabIconSvg`) plutôt qu'une classe de
+       police, seule façon d'obtenir sur l'onglet exactement l'icône cochée à la création.
+       Le SVG est en `stroke="currentColor"` → il suffit de piloter la couleur du lien, avec la même
+       progression atténué → accent que les onglets glyphicons ci-dessus. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a:has(> svg) { color: var(--melis-plugin-muted) !important; }
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a:has(> svg),
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.active:has(> svg),
+    #{$zoneId} .widget-tabs .nav-tabs > li > a:hover:has(> svg) { color: var(--melis-plugin-primary) !important; }
+    /* Un SVG inline s'aligne sur la ligne de base et « pend » sous la ligne : on le recentre. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a > svg { vertical-align: middle !important; }
+    /* Présentation en « cellules », comme les onglets du dashboard legacy (bundle.css :
+       `li { height:40px; line-height:40px; border-right:1px solid #e5e5e5 }`) : icône centrée dans
+       un onglet de hauteur fixe, filet vertical entre deux onglets, pas de filet après le dernier.
+       Le legacy obtenait ce centrage en positionnant le `:before` du glyphe en absolu ; un SVG
+       inline n'a pas de `:before`, d'où le centrage par flex.
+       ⚠️ Ciblé sur les onglets PORTEURS D'UN SVG (ceux du créateur de plugins) : les strips
+          glyphicons/FA des autres plugins gardent exactement leur mise en page d'origine. */
+    #{$zoneId} .widget-tabs .nav-tabs > li:has(> a > svg) { border-right: 1px solid var(--melis-plugin-border) !important; }
+    #{$zoneId} .widget-tabs .nav-tabs > li:has(> a > svg):last-of-type { border-right: none !important; }
+    #{$zoneId} .widget-tabs .nav-tabs > li > a:has(> svg) {
+      display: flex !important; align-items: center !important; justify-content: center !important;
+      height: 40px !important; min-width: 58px !important; padding: 0 16px !important;
+    }
+    /* Onglets à icône FONT-AWESOME : repli du générateur pour une clé sans tracé connu. */
+    #{$zoneId} .widget-tabs .nav-tabs > li > a > i.fa { color: var(--melis-plugin-muted) !important; }
+    #{$zoneId} .widget-tabs .nav-tabs > li.active > a > i.fa,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a.active > i.fa,
+    #{$zoneId} .widget-tabs .nav-tabs > li > a:hover > i.fa { color: var(--melis-plugin-primary) !important; }
     /* Le glyphe « file » de Glyphicons (\\E037) dessine sa PAGE en BLANC dans la police elle-même —
        aucun CSS ne peut recolorer une portion d'un glyphe, et son fond `<i>` est bien transparent
        (confirmé au DevTools). On abandonne donc la police : on VIDE le glyphe (`content:""`) et on
@@ -2706,6 +2737,38 @@ CSS;
 {$workflowDialogCss}
 {$darkCss}
 {$narrowCss}</style>
+<!-- Barre d'onglets des plugins GÉNÉRÉS (cf. svgifyGeneratedTabIcons) — présentation en
+     « cellules », comme le dashboard legacy : icône centrée dans un onglet de hauteur fixe et
+     filet vertical entre deux onglets. Le legacy y parvenait en positionnant le `:before` du
+     glyphe en absolu ; l'icône est ici un SVG inline, sans `:before`, d'où le centrage par flex.
+
+     ⚠️ Feuille SÉPARÉE, et non une poignée de règles ajoutées au gros bloc ci-dessus : une partie
+        de ce bloc n'arrive pas jusqu'au CSSOM (règles présentes dans le texte du <style>, absentes
+        de `sheet.cssRules`), donc une règle qu'on y ajoute peut rester lettre morte. Un <style>
+        court et autonome est parsé de façon fiable. Le filet est porté par l'ANCRE (pas par le
+        `<li>`) pour éviter `:has()`, afin de rester lisible et robuste.
+
+     `margin-top: 0` sur le bloc d'onglets : la vue générée place le strip dans un `.widget` imbriqué
+     dont le legacy espace le haut (marge de widget), ce qui creusait un vide sous l'en-tête de la
+     tuile React — laquelle dessine déjà son propre en-tête. -->
+<style>
+  .melis-dpc-tab {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 40px !important;
+    min-width: 58px !important;
+    padding: 0 16px !important;
+    /* Filet en OMBRE INTERNE, pas en `border-right` : le thème legacy pose un `border` !important
+       plus spécifique sur `.nav-tabs > li > a` (il gagnait, et le filet ne s'affichait pas).
+       `box-shadow` n'est visé par aucune de ces règles → pas de bataille de spécificité. */
+    box-shadow: inset -1px 0 0 0 var(--melis-plugin-border, #e5e5e5) !important;
+  }
+  li:last-child > .melis-dpc-tab { box-shadow: none !important; }
+  .widget.widget-tabs:has(.melis-dpc-tab) { margin: 0 !important; }
+  .widget.widget-tabs:has(.melis-dpc-tab) > .widget-head { padding: 0 !important; min-height: 0 !important; }
+  .widget.widget-tabs:has(.melis-dpc-tab) > .widget-head ul { margin: 0 !important; height: auto !important; }
+</style>
 </head>
 <body>
 <!-- Barre d'onglets factice (cachée). melisCore.js, à son init, ÉCRASE le global activeTabId avec
@@ -4332,6 +4395,112 @@ HTML;
      * Générique : on ne connaît pas les noms d'options des plugins, mais on sait que la racine
      * porte la structure (conf/datas/forward/plugin_id…) et `datas` les valeurs.
      */
+    /**
+     * Rétablit sur le conteneur legacy la classe CSS que le dashboard CLASSIQUE lui donne.
+     *
+     * `plugin-container.phtml` dérive une classe du `plugin_id` :
+     *     strtolower(explode('_', preg_replace('/(?<!^)([A-Z])/', '-$1', $pluginId))[0])
+     *
+     * En legacy, MelisCoreDashboardTemplatingPlugin fabrique ce `plugin_id` à partir de
+     * `datas['plugin_id']` suffixé d'un timestamp ("AverageOpportunityWon_1748…") — d'où le
+     * `explode('_')[0]`, qui retire le suffixe → classe `average-opportunity-won`.
+     *
+     * Ici on rend le plugin en passant `plugin_id = $pluginName` (le nom du controller-plugin,
+     * "AverageOpportunityWonPlugin"), car c'est cette clé qui indexe les nœuds de config
+     * sauvegardés côté React (ligne react_dashboard_config) : on ne peut pas la changer sans
+     * casser la relecture des réglages. Mais la classe dérivée devient alors
+     * `average-opportunity-won-PLUGIN`, et tout JS de plugin qui se scope dessus ne matche plus :
+     *     $('div.grid-stack-item.grid-stack-animate.average-opportunity-won')   // ← 0 élément
+     * → le callback ne s'exécute jamais (ex. `initSelect()` de NehsDashboardPlugins, qui remplace
+     * les `<select multiple>` par des MultiCheckBox) et le widget garde une mise en page brute.
+     *
+     * On AJOUTE donc le token legacy à côté de celui déjà présent (on ne remplace pas : du JS
+     * pourrait cibler l'un ou l'autre). Sans `datas['plugin_id']`, ou si le token est déjà là,
+     * on ne touche à rien.
+     *
+     * Pendant du côté dashboard CLASSIQUE : MelisReactApiController::dashboardLayoutAction()
+     * écrit un `plugin_id` à la convention legacy dans le record partagé, pour que la classe y
+     * soit correcte elle aussi.
+     */
+    /**
+     * Remplace, dans la barre d'onglets d'un plugin généré, le glyphe de POLICE par le TRACÉ SVG
+     * que l'assistant de création a montré au moment du choix.
+     *
+     * Le Dashboard Plugin Creator écrit `<a class="glyphicons <clé>">…<i></i></a>` : l'icône est
+     * alors un glyphe Glyphicons, alors que le sélecteur de l'assistant dessine des icônes au
+     * TRAIT. Même symbole, dessin différent — « ce que j'ai choisi n'est pas ce que je vois ».
+     * Aucune police ne peut résoudre ça : il faut dessiner la même forme.
+     *
+     * Fait ICI, à la volée, et non dans le générateur : la vue générée et son template restent
+     * ceux du legacy (aucun fichier du module créateur modifié), et la correction vaut aussi pour
+     * les plugins DÉJÀ générés. Contrepartie assumée : elle ne vaut que pour le dashboard React —
+     * le dashboard classique continue d'afficher les glyphes Glyphicons.
+     *
+     * Les tracés viennent de `melisdashboardplugincreator/datas/dashboardTabIconSvg`, la table que
+     * le sélecteur utilise : une seule source, donc aucune dérive possible entre les deux. Si le
+     * module créateur est absent/inactif, on ne touche à rien (les onglets restent en Glyphicons).
+     */
+    private function svgifyGeneratedTabIcons(?string $html): ?string
+    {
+        if ($html === null || strpos($html, 'glyphicons') === false) {
+            return $html;
+        }
+
+        $svgMap = $this->getServiceManager()->get('MelisCoreConfig')
+            ->getItem('melisdashboardplugincreator/datas/dashboardTabIconSvg');
+        if (empty($svgMap) || !is_array($svgMap)) {
+            return $html;
+        }
+
+        // On ne vise QUE les ancres d'onglet du créateur : `class="glyphicons <clé> nav-link…"`
+        // suivi d'un `<i></i>` vide. Les autres usages de `glyphicons` (workflow, etc.) ne
+        // correspondent pas à cette forme et sont laissés intacts.
+        return preg_replace_callback(
+            '~<a class="glyphicons ([A-Za-z0-9_]+) (nav-link[^"]*)"(.*?)><i></i></a>~s',
+            function (array $m) use ($svgMap) {
+                if (!isset($svgMap[$m[1]])) {
+                    return $m[0];
+                }
+                // `melis-dpc-tab` : crochet de style pour la mise en « cellules » (cf. le <style>
+                // dédié injecté dans la page du plugin). `currentColor` → l'icône suit la couleur
+                // du lien, donc les états repos/actif/survol du thème s'appliquent sans règle en plus.
+                return '<a class="melis-dpc-tab ' . $m[2] . '"' . $m[3] . '>'
+                    . '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"'
+                    . ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+                    . ' stroke-linejoin="round" aria-hidden="true">' . $svgMap[$m[1]] . '</svg></a>';
+            },
+            $html
+        );
+    }
+
+    private function addLegacyPluginIdClass(?string $html, array $appsConfig): ?string
+    {
+        $pluginId = $appsConfig['datas']['plugin_id'] ?? '';
+        if ($html === null || !is_string($pluginId) || $pluginId === '') {
+            return $html;
+        }
+
+        // Même dérivation que plugin-container.phtml.
+        $legacyClass = strtolower(explode('_', preg_replace('/(?<!^)([A-Z])/', '-\\1', $pluginId))[0]);
+        if ($legacyClass === '') {
+            return $html;
+        }
+
+        return preg_replace_callback(
+            '#<div\s[^>]*class="([^"]*\bgrid-stack-item\b[^"]*)"#',
+            function (array $m) use ($legacyClass) {
+                $classes = preg_split('/\s+/', trim($m[1])) ?: [];
+                if (in_array($legacyClass, $classes, true)) {
+                    return $m[0];
+                }
+
+                return str_replace('class="' . $m[1] . '"', 'class="' . $m[1] . ' ' . $legacyClass . '"', $m[0]);
+            },
+            $html,
+            1
+        );
+    }
+
     private function hoistPluginConfigDatas(?string $html): ?string
     {
         if ($html === null || !str_contains($html, 'dashboard-plugin-json-config')) {
