@@ -4738,13 +4738,18 @@ HTML;
     public function generateAction()
     {
         // The login page itself renders through THIS action: MelisAuthController::loginpageAction()
-        // forwards here with appconfigpath=/meliscore_login — that is the one legitimate anonymous
-        // caller (it's how an unauthenticated visitor sees the login form at all). Every other
-        // caller of this generic zone renderer is already gated by MelisCore\Module::checkIdentity()
+        // forwards here with appconfigpath=/meliscore_login — that is the original legitimate
+        // anonymous caller (it's how an unauthenticated visitor sees the login form at all). Every
+        // other caller of this generic zone renderer is already gated by MelisCore\Module::checkIdentity()
         // (attached on EVENT_ROUTE) upstream; this local guard is defense-in-depth for tool-renderer
-        // callers (see denyIfUnauthenticated() docblock), not for the public login zone tree.
+        // callers (see denyIfUnauthenticated() docblock), not for public pre-login zone trees. The
+        // allowlist is config-driven (meliscore/datas/public_zones, seeded in melis-core's own
+        // excluded.routes.php) rather than a single hardcoded string, so another module's own
+        // pre-login page (e.g. melis-login-2fa's verify-2fa code entry) can register itself without
+        // touching this file — same ArrayUtils::merge pattern already used for excluded_routes.
         $appconfigpath = $this->params()->fromRoute('appconfigpath', '');
-        if ($appconfigpath !== '/meliscore_login' && ($denied = $this->denyIfUnauthenticated())) {
+        $publicZones = $this->getServiceManager()->get('MelisCoreConfig')->getItem('/meliscore/datas/public_zones');
+        if (!in_array($appconfigpath, is_array($publicZones) ? $publicZones : [], true) && ($denied = $this->denyIfUnauthenticated())) {
             return $denied;
         }
 
