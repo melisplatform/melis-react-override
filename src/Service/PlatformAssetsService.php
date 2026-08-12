@@ -48,28 +48,6 @@ class PlatformAssetsService
             $cssFiles = array_values(array_filter(self::cachedModuleCss($sm), $exists));
         } catch (\Throwable) {}
 
-        // MelisCore's OWN css bundle (Bootstrap + admin layout, i.e. the styling that makes any
-        // legacy tool look like the back-office) is NOT part of getAssets('/'): the real layout
-        // (layoutCore.phtml) loads the meliscore interface separately via
-        // MelisCoreHeadPlugin('/meliscore'), so getAssets deliberately omits it. Two cases:
-        //   • bundle built (dev6/prod): getAssets returns the single '/melis/get-css-bundles' URL,
-        //     whose concatenation ALREADY contains the core css → nothing to add.
-        //   • no concatenated bundle (typical local): getAssets falls back to the per-module
-        //     build/css/bundle.css list, WITHOUT MelisCore → every tool renders as raw unstyled
-        //     HTML. Prepend the core css bundle so the iframe matches the back-office.
-        // Mirrors the JS side, which likewise hard-codes '/MelisCore/build/js/bundle.js' below.
-        $coreCss = '/MelisCore/build/css/bundle.css';
-        $hasConcatBundle = false;
-        foreach ($cssFiles as $c) {
-            if (str_starts_with($c, '/melis/get-css-bundles') || str_starts_with($c, $coreCss)) {
-                $hasConcatBundle = true;
-                break;
-            }
-        }
-        if (!$hasConcatBundle && $exists($coreCss)) {
-            array_unshift($cssFiles, $coreCss);
-        }
-
         // JS load queue:
         //   1. Translations (locale strings)
         //   2. MelisCore bundle.js (jQuery, Bootstrap, DataTables, core tools)
@@ -181,6 +159,21 @@ class PlatformAssetsService
         }
         $raw = $sm->get('MelisAssetManagerWebPack')->getAssets(true);
         $css = array_values((array) ($raw['css'] ?? []));
+
+        // With a CONCATENATED bundle, getAssets(true) returns that single route
+        // (`/melis/get-css-bundles`) instead of the per-module list. The browser is happy with a
+        // route, but LegacyWidgetCssService needs FILES on disk — and the bundle is produced by the
+        // Modules tool, which can leave `etc/bundles/css/bundle-all.css` EMPTY (0 byte after a fresh
+        // install — observed). Either case leaves the React widgets with almost no legacy CSS:
+        // unstyled Bootstrap grid/media/alert, and `.hidden` undefined, so a plugin's hidden JSON
+        // config node shows up as raw text. Fall back to the per-module list, which always exists.
+        // Decided here rather than in build() so the (expensive) getAssets call is cached too.
+        if (count($css) === 1 && self::isConcatBundleUrl($css[0])) {
+            $path = self::concatBundlePath($css[0]);
+            if ($path === null || @filesize($path) <= 0) {
+                $css = array_values((array) ($sm->get('MelisAssetManagerWebPack')->getAssets(false)['css'] ?? []));
+            }
+        }
         if ($css !== []) {
             @file_put_contents($file, json_encode($css), LOCK_EX);
         }
@@ -192,8 +185,33 @@ class PlatformAssetsService
      * disk, mirroring MelisAssetManager's URL→module mapping. Returns null for external URLs or
      * anything not found. The DOCUMENT_ROOT + modules-path map are loaded once per request.
      */
+    /** `/melis/get-css-bundles?v=…` / `/melis/get-js-bundles?v=…` — the concatenated-bundle routes. */
+    public static function isConcatBundleUrl(string $url): bool
+    {
+        return str_starts_with($url, '/melis/get-css-bundles') || str_starts_with($url, '/melis/get-js-bundles');
+    }
+
+    /**
+     * File served by those routes (`etc/bundles/{css,js}/bundle-all.{css,js}`, cf. MelisCore
+     * ModulesController::get{Css,Js}BundlesAction). Returns null when absent.
+     */
+    public static function concatBundlePath(string $url): ?string
+    {
+        $docRoot = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/');
+        $isCss   = str_starts_with($url, '/melis/get-css-bundles');
+        $path    = $docRoot . '/../etc/bundles/' . ($isCss ? 'css/bundle-all.css' : 'js/bundle-all.js');
+
+        return is_file($path) ? $path : null;
+    }
+
     public static function resolvePath(string $url): ?string
     {
+        // Route, not a file: map it to the bundle it serves, so callers that read from disk
+        // (LegacyWidgetCssService) see the same bytes the browser would download.
+        if (self::isConcatBundleUrl($url)) {
+            return self::concatBundlePath($url);
+        }
+
         static $docRoot = null, $modulesPath = null;
         if ($docRoot === null) {
             $docRoot = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/');
