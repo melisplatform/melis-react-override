@@ -162,6 +162,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         $pinnedSessionId = $this->currentSessionId();
 
         // ── Render the zone HTML (with inline <script> tags intact) ──────────
+        // Legacy zones sometimes `echo` diagnostics STRAIGHT to the output stream while they
+        // render, outside of any view — e.g. MelisCmsGoogleAnalytics' API service echoes the
+        // Google SDK exception ("invalid json for auth config") when the service-account JSON
+        // configured for the site is unreadable. That raw text is emitted before we assemble
+        // the page, so it surfaces at the very top of the tool page — i.e. under whatever tab
+        // is active, typically Edition — and repeats once per zone calling the faulty service.
+        // We don't patch the legacy modules from here: we capture whatever they write during
+        // the render and keep it out of the markup (kept as an HTML comment for diagnosis).
+        $strayLevel = ob_get_level();
+        ob_start();
+
         $zoneView = $this->generateRec($keyView, $appConfigPath, $jsCallBacks, []);
         $zoneView->setVariable('zoneconfig', $appsConfig);
         $zoneView->setVariable('parameters', []);
@@ -173,6 +184,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         }
 
         $html = $this->renderViewRec($zoneView);
+
+        // A legacy view may leave buffers open; unwind down to our own level whatever happens.
+        $stray = '';
+        while (ob_get_level() > $strayLevel) {
+            $stray .= (string) ob_get_clean();
+        }
+        $stray = trim($stray);
+        if ($stray !== '') {
+            $html .= "\n<!-- melis-react-override: stray output captured while rendering '"
+                . str_replace('--', '- -', (string) $key) . "': "
+                . str_replace('--', '- -', $stray) . " -->\n";
+        }
 
         $this->pinSessionId($pinnedSessionId);
 
