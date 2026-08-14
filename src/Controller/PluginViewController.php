@@ -3660,7 +3660,8 @@ CSS;
   if (!document.querySelector('.melissb-dashboard-workflow')) return;
   var ROUTE_BY_TOOLKEY = {
     'meliscms_page':     '/melis-cms/page',
-    'meliscmsnews_page': '/melis-cms/news'
+    'meliscmsnews_page': '/melis-cms/news',
+    'meliscmsblog_page': '/melis-cms/blog'
   };
   document.addEventListener('click', function(e){
     var see = e.target && e.target.closest ? e.target.closest('.wd-see') : null;
@@ -3732,7 +3733,8 @@ CSS;
 (function(){
   if (!document.querySelector('.melis-cms-comments-dashboard-latest-comments')) return;
   var ROUTE_BY_POST_TYPE = {
-    'news': '/melis-cms/news'
+    'news': '/melis-cms/news',
+    'blog': '/melis-cms/blog'
   };
   document.addEventListener('click', function(e){
     var eye = e.target && e.target.closest ? e.target.closest('.mccom-view-post') : null;
