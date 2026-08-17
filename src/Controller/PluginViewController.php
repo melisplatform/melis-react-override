@@ -1320,7 +1320,7 @@ HTML;
        (prospects : xaxis + yaxis) → des traits de grille BLANCS sur fond sombre, très marqués.
        On repasse donc l'axe (formes `xaxis`/`yaxis` ET `xaxes[]`/`yaxes[]`) sur le même token. */
     var axis = function(a){ return a ? jq.extend({}, a, { tickColor: border }) : a; };
-    var axes = function(list){ return jq.isArray(list) ? jq.map(list, axis) : list; };
+    var axes = function(list){ return Array.isArray(list) ? jq.map(list, axis) : list; };
     var opts = options || {};
     opts = jq.extend({}, opts, { grid: jq.extend({}, opts.grid || {}, {
       backgroundColor: null, /* ← le fond blanc peint dans le canvas */
@@ -1380,8 +1380,8 @@ JS;
     if (!isDark()) return original.apply(this, arguments); /* clair = couleur d'origine de la série */
     var primary = token('--melis-plugin-primary', '#2f6bff');
     var bg      = token('--melis-plugin-bg', '#0e1626');
-    var series = jq.isArray(data) ? jq.map(data, function(s){
-      if (!s || typeof s !== 'object' || jq.isArray(s)) return s;
+    var series = Array.isArray(data) ? jq.map(data, function(s){
+      if (!s || typeof s !== 'object' || Array.isArray(s)) return s;
       return jq.extend({}, s, {
         color: primary,
         points: jq.extend({}, s.points || {}, { fillColor: bg })
