@@ -4077,6 +4077,52 @@ HTML;
     }
 
     /**
+     * Serves the platform's concatenated asset bundle (`etc/bundles/{css,js}/bundle-all[-login].*`)
+     * for the tool and dashboard-plugin iframes.
+     *
+     * Why not MelisCore's `/melis/get-{css,js}-bundles`: that action sets its `Content-Type` INSIDE
+     * the `file_exists()` branch and otherwise just `exit`s, so a missing bundle produces a 200 with
+     * an empty `text/html` body — which the browser refuses ("Refused to apply style from … MIME
+     * type ('text/html') … strict MIME checking") — and the previous `immutable` header let that
+     * empty answer be cached for a month. And the file IS routinely missing: saving the Modules tool
+     * wipes `etc/bundles/`, while only a hit on `/melis` or `/melis/login` rebuilds it — something a
+     * session living in `/melis-react` never does.
+     *
+     * Here the MIME type is always sent, and an empty answer is explicitly not cacheable, so the
+     * next render (which falls back to the per-module stylesheet list, cf. PlatformAssetsService)
+     * is picked up immediately.
+     */
+    public function platformBundleAction()
+    {
+        $isJs = $this->params()->fromQuery('t') === 'js';
+        $type = $isJs ? 'js' : 'css';
+        $mime = $isJs ? 'text/javascript' : 'text/css';
+
+        $response = $this->getResponse();
+        $headers  = $response->getHeaders()->addHeaderLine('Content-Type', $mime . '; charset=utf-8');
+
+        $path = \MelisReactOverride\Service\PlatformAssetsService::bundleFile(
+            $type,
+            $this->getServiceManager()
+        );
+
+        if ($path === null) {
+            // Nothing to serve: keep the declared type (an empty stylesheet is harmless, an HTML
+            // one is rejected) and make sure this answer is never cached.
+            $headers->addHeaderLine('Cache-Control', 'no-store, max-age=0');
+            $response->setContent('');
+
+            return $response;
+        }
+
+        // Versioned by the caller (?v=<plf_bundle_cache_time>) and rewritten on every rebuild.
+        $headers->addHeaderLine('Cache-Control', 'public, max-age=2629744, immutable');
+        $response->setContent((string) @file_get_contents($path));
+
+        return $response;
+    }
+
+    /**
      * JS/CSS declared by ONE dashboard plugin, as opposed to its whole module.
      *
      * Melis merges every config file of a module into a single module-level `ressources` node, so

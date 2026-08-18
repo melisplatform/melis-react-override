@@ -79,6 +79,22 @@ return [
                             ],
                         ],
                     ],
+                    // Serves the platform's CONCATENATED asset bundle (etc/bundles/…) for the
+                    // tool/plugin iframes, in place of MelisCore's own /melis/get-{css,js}-bundles.
+                    // Those legacy routes answer an empty `text/html` body when the bundle file is
+                    // missing (the Modules tool deletes it on save and only a /melis hit rebuilds
+                    // it), which the browser rejects with "Refused to apply style … MIME type
+                    // ('text/html')". This one always answers with the right MIME type.
+                    'react-platform-bundle' => [
+                        'type'    => 'Segment',
+                        'options' => [
+                            'route'    => 'react-platform-bundle',
+                            'defaults' => [
+                                'controller' => 'MelisCore\Controller\PluginView',
+                                'action'     => 'platformBundle',
+                            ],
+                        ],
+                    ],
                     // The legacy back-office stylesheets, every rule scoped under
                     // `.melis-legacy-widget` so they cannot restyle the React shell.
                     'react-legacy-widget-css' => [
@@ -139,6 +155,11 @@ return [
             'datas' => [
                 'excluded_routes' => [
                     'meliscore-melis-react-spa',
+                    // Bundle d'assets de la plateforme (iframes des outils) : route publique comme
+                    // l'est déjà `melis-backoffice/get-css-bundles` côté MelisCore. Sans exclusion,
+                    // une session expirée ferait rediriger la feuille de style vers /melis/login,
+                    // donc du HTML — exactement l'erreur MIME que cette route corrige.
+                    'melis-backoffice/react-platform-bundle',
                     // Lecture publique du thème React (branding du panneau gauche du login,
                     // affiché AVANT authentification). Seul le GET est exclu ; le /save reste protégé.
                     'melis-backoffice/melis-react-api/platformscheme-react-get',
