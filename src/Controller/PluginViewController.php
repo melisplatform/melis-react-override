@@ -304,6 +304,33 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         };
         $collectForwardRoots($appsConfig);
 
+        // A tool page is only the zone we were asked for — for a module tool that is its LIST
+        // (e.g. meliscmsblog_left_menu). Everything else the tool can show is loaded LATER, from
+        // inside the iframe, by the legacy tabOpen/zoneReload AJAX calls, which never re-enter
+        // buildToolPage. So a module contributing a TAB to that tool through a `forward` deeper in
+        // the tree is invisible to the walks above, and its scripts never reach the page.
+        // Concrete case: MelisCmsComments grafts the "Comments" tab onto the blog/news post form
+        // (melis-cms-blog/config/comments.config.php → forward MelisCmsComments). comments.js was
+        // therefore absent, and since every action there is a delegated $('body') handler
+        // (.add-comment-to-post, .melis-cms-comments-edit, .comments-table-refresh), clicking
+        // "Add a comment" did strictly nothing — no modal, no console error.
+        // Walk the tool's WHOLE plugin root instead of just the requested zone: that tree holds
+        // every tab the tool can open, whenever it opens it. Injecting a module's ressources stays
+        // a subset of what the classic back-office layout loads (it loads EVERY active module's),
+        // identical URLs are de-duplicated below, and an inactive module contributes no `forward`
+        // at all — so this stays fully modular and cannot double-bind a handler.
+        // 'meliscore' is excluded: it is not "a module's tree" but the WHOLE back-office tool tree
+        // (every module grafts its tools under it), so walking it would pull in every active
+        // module's scripts on any MelisCore tool page. MelisCore tools that host a contributed tab
+        // are already covered by the forward walk over their own zone above.
+        if ($pluginKey !== '' && strtolower($pluginKey) !== 'meliscore') {
+            $pluginTree = $melisAppConfig->getItem('/' . $pluginKey);
+            if (is_array($pluginTree)) {
+                $collectForwardRoots($pluginTree);
+                $collectTypeRoots($pluginTree);
+            }
+        }
+
         // MelisSmallBusiness contributes action buttons to the CMS page editor (page-lock
         // unlock, versioning, comments, workflow) through `forward` links — which the `type`
         // walk above cannot reach. Their click handlers live in the melisSB ressources
