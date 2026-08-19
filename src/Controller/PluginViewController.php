@@ -362,6 +362,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             // does nothing at all — no modal, no console error. FULLY MODULAR: getItem() below
             // returns null when the module is inactive → nothing injected (no phantom load).
             $roots['melis_newsletter_tool_config'] = true;
+            // MelisCacheInternal grafts a "Partial caching" TAB onto EVERY plugin's parameters
+            // modal (app.forms.php → meliscacheinternal_partial_caching_plugins_tab_form). That
+            // tab's view (partial-caching-common-form-config.phtml) ends with an INLINE
+            // `initCacheCodeAutoSuggesst("#partial_caching_code")` call, and the function is
+            // defined by /MelisCacheInternal/js/partial-caching.js. The modal is opened LATER from
+            // inside the iframe (createPluginModal → AJAX), so no walk above can see the module —
+            // its root is neither a `type` link nor a `forward` of the page-editor tree. Without
+            // this, clicking "Parameters" on any plugin throws
+            // "ReferenceError: initCacheCodeAutoSuggesst is not defined" at parse time, which
+            // aborts the rest of that inline script block. FULLY MODULAR: getItem() below returns
+            // null when MelisCacheInternal is inactive → nothing injected (no phantom load).
+            $roots['meliscacheinternal'] = true;
         }
 
         // The Orders list's own appsConfig tree (fetched above) only covers the list zone
@@ -987,6 +999,41 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      Nothing from a legacy tool's own notifications is forwarded to the React host chrome. */
 </script>
 {$callbackBlocks}
+<script>
+/* ── Icône « clé à molette » des formulaires de plugin (`open_tool`) : ouvrir l'outil en ONGLET ─
+   Les formulaires de paramètres de plugin peuvent afficher, à côté d'un select, une clé à molette
+   qui ouvre l'outil qui alimente ce select (ex. « Default post » du plugin Blog → l'outil Blog ;
+   idem Actualités, Slider, Prospects). Elle est générée par MelisFieldRow (option `open_tool`) et
+   ne porte QUE des attributs data — c'est melisCore.js qui, sur `.melis-opentools`, appelle
+   `melisHelper.tabOpen(...)`. Or tabOpen ne sait ouvrir un onglet QUE dans le document de son
+   propre iframe : ici il injectait l'outil cible DANS la page d'édition (l'outil legacy écrasait
+   le contenu de l'onglet « Edition »), sans les ressources JS de son module (d'où un
+   « initBlogList is not defined » et une liste vide).
+   On intercepte donc en capture (AVANT le handler délégué sur `body`) et on demande à l'hôte React
+   d'ouvrir l'outil comme un vrai onglet, via le pont `__melisOpenTool` (App.tsx) — même mécanisme
+   que les plugins de dashboard (cf. dashboardPluginPageAction). Ici l'appelant ne connaît que le
+   melisKey de la cible : c'est l'hôte qui le résout en route React (registre alimenté par le
+   menu, briques comprises).
+   On vise `.m-dnd-tool-open` (classe propre à la clé à molette des formulaires) et non
+   `.melis-opentools`, partagée avec l'arbre des outils du BO legacy. */
+(function(){
+  document.addEventListener('click', function(e){
+    var wrench = e.target && e.target.closest ? e.target.closest('.m-dnd-tool-open') : null;
+    if (!wrench) return;
+    var melisKey = wrench.getAttribute('data-tool-meliskey');
+    if (!melisKey) return;
+    var host = window.__melisRealParent || window.parent;
+    if (!host || host === window) return;
+    e.preventDefault();
+    e.stopPropagation();
+    /* melisModalOpenTools.js ferme la modale du plugin via un handler délégué sur cette même
+       classe — neutralisé par notre stopPropagation : on le refait, sinon la modale resterait
+       ouverte derrière au retour sur l'onglet de la page. */
+    try { melisCoreTool.hideModal('id_meliscms_plugin_modal_container'); } catch (err) {}
+    try { host.postMessage({ __melisOpenTool: true, melisKey: melisKey }, '*'); } catch (err) {}
+  }, true);
+})();
+</script>
 </body>
 </html>
 HTML;
