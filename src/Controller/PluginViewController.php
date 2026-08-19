@@ -797,7 +797,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        tall modals (e.g. the AI-agent scenario-step editor) stay fully usable. Short modals keep
        their natural height (max-height only caps). */
     .modal { overflow-x: hidden !important; overflow-y: auto !important; }
-    .modal .modal-body { max-height: calc(100vh - 6rem); overflow-y: auto; }{$extraStyle}
+    .modal .modal-body { max-height: calc(100vh - 6rem); overflow-y: auto; }
+    /* Clé à molette `open_tool` des formulaires de plugin : MelisCmsBlog la MASQUE dans sa propre
+       modale (blog.css : `#melis_cms_blog_list_plugin_template_form .melis-opentools,
+       #id_meliscms_plugin_modal .melis-opentools { display:none }`) — dans le BO legacy le clic
+       n'ouvrait rien d'utilisable. Le BO React sait l'ouvrir en vrai onglet (pont en fin de body),
+       donc on la ré-affiche ICI (et seulement ici — le BO legacy n'est pas touché). Ciblé sur
+       `.m-dnd-tool-open`, la classe des SEULES clés à molette de formulaire : les masquages
+       délibérés d'outils inexistants portent sur `.melis-opentools[data-tool-meliskey=…]` dans
+       l'arbre des outils (MelisDesign / maps) et restent intacts. */
+    #melis_cms_blog_list_plugin_template_form .m-dnd-tool-open,
+    #id_meliscms_plugin_modal .m-dnd-tool-open { display: inline-block !important; }{$extraStyle}
   </style>
 </head>
 <body>
