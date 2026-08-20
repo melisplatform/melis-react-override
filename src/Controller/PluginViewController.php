@@ -162,6 +162,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         $pinnedSessionId = $this->currentSessionId();
 
         // ── Render the zone HTML (with inline <script> tags intact) ──────────
+        // Legacy zones sometimes `echo` diagnostics STRAIGHT to the output stream while they
+        // render, outside of any view — e.g. MelisCmsGoogleAnalytics' API service echoes the
+        // Google SDK exception ("invalid json for auth config") when the service-account JSON
+        // configured for the site is unreadable. That raw text is emitted before we assemble
+        // the page, so it surfaces at the very top of the tool page — i.e. under whatever tab
+        // is active, typically Edition — and repeats once per zone calling the faulty service.
+        // We don't patch the legacy modules from here: we capture whatever they write during
+        // the render and keep it out of the markup (kept as an HTML comment for diagnosis).
+        $strayLevel = ob_get_level();
+        ob_start();
+
         $zoneView = $this->generateRec($keyView, $appConfigPath, $jsCallBacks, []);
         $zoneView->setVariable('zoneconfig', $appsConfig);
         $zoneView->setVariable('parameters', []);
@@ -173,6 +184,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         }
 
         $html = $this->renderViewRec($zoneView);
+
+        // A legacy view may leave buffers open; unwind down to our own level whatever happens.
+        $stray = '';
+        while (ob_get_level() > $strayLevel) {
+            $stray .= (string) ob_get_clean();
+        }
+        $stray = trim($stray);
+        if ($stray !== '') {
+            $html .= "\n<!-- melis-react-override: stray output captured while rendering '"
+                . str_replace('--', '- -', (string) $key) . "': "
+                . str_replace('--', '- -', $stray) . " -->\n";
+        }
 
         $this->pinSessionId($pinnedSessionId);
 
@@ -281,6 +304,33 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         };
         $collectForwardRoots($appsConfig);
 
+        // A tool page is only the zone we were asked for — for a module tool that is its LIST
+        // (e.g. meliscmsblog_left_menu). Everything else the tool can show is loaded LATER, from
+        // inside the iframe, by the legacy tabOpen/zoneReload AJAX calls, which never re-enter
+        // buildToolPage. So a module contributing a TAB to that tool through a `forward` deeper in
+        // the tree is invisible to the walks above, and its scripts never reach the page.
+        // Concrete case: MelisCmsComments grafts the "Comments" tab onto the blog/news post form
+        // (melis-cms-blog/config/comments.config.php → forward MelisCmsComments). comments.js was
+        // therefore absent, and since every action there is a delegated $('body') handler
+        // (.add-comment-to-post, .melis-cms-comments-edit, .comments-table-refresh), clicking
+        // "Add a comment" did strictly nothing — no modal, no console error.
+        // Walk the tool's WHOLE plugin root instead of just the requested zone: that tree holds
+        // every tab the tool can open, whenever it opens it. Injecting a module's ressources stays
+        // a subset of what the classic back-office layout loads (it loads EVERY active module's),
+        // identical URLs are de-duplicated below, and an inactive module contributes no `forward`
+        // at all — so this stays fully modular and cannot double-bind a handler.
+        // 'meliscore' is excluded: it is not "a module's tree" but the WHOLE back-office tool tree
+        // (every module grafts its tools under it), so walking it would pull in every active
+        // module's scripts on any MelisCore tool page. MelisCore tools that host a contributed tab
+        // are already covered by the forward walk over their own zone above.
+        if ($pluginKey !== '' && strtolower($pluginKey) !== 'meliscore') {
+            $pluginTree = $melisAppConfig->getItem('/' . $pluginKey);
+            if (is_array($pluginTree)) {
+                $collectForwardRoots($pluginTree);
+                $collectTypeRoots($pluginTree);
+            }
+        }
+
         // MelisSmallBusiness contributes action buttons to the CMS page editor (page-lock
         // unlock, versioning, comments, workflow) through `forward` links — which the `type`
         // walk above cannot reach. Their click handlers live in the melisSB ressources
@@ -312,6 +362,18 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
             // does nothing at all — no modal, no console error. FULLY MODULAR: getItem() below
             // returns null when the module is inactive → nothing injected (no phantom load).
             $roots['melis_newsletter_tool_config'] = true;
+            // MelisCacheInternal grafts a "Partial caching" TAB onto EVERY plugin's parameters
+            // modal (app.forms.php → meliscacheinternal_partial_caching_plugins_tab_form). That
+            // tab's view (partial-caching-common-form-config.phtml) ends with an INLINE
+            // `initCacheCodeAutoSuggesst("#partial_caching_code")` call, and the function is
+            // defined by /MelisCacheInternal/js/partial-caching.js. The modal is opened LATER from
+            // inside the iframe (createPluginModal → AJAX), so no walk above can see the module —
+            // its root is neither a `type` link nor a `forward` of the page-editor tree. Without
+            // this, clicking "Parameters" on any plugin throws
+            // "ReferenceError: initCacheCodeAutoSuggesst is not defined" at parse time, which
+            // aborts the rest of that inline script block. FULLY MODULAR: getItem() below returns
+            // null when MelisCacheInternal is inactive → nothing injected (no phantom load).
+            $roots['meliscacheinternal'] = true;
         }
 
         // The Orders list's own appsConfig tree (fetched above) only covers the list zone
@@ -735,7 +797,17 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
        tall modals (e.g. the AI-agent scenario-step editor) stay fully usable. Short modals keep
        their natural height (max-height only caps). */
     .modal { overflow-x: hidden !important; overflow-y: auto !important; }
-    .modal .modal-body { max-height: calc(100vh - 6rem); overflow-y: auto; }{$extraStyle}
+    .modal .modal-body { max-height: calc(100vh - 6rem); overflow-y: auto; }
+    /* Clé à molette `open_tool` des formulaires de plugin : MelisCmsBlog la MASQUE dans sa propre
+       modale (blog.css : `#melis_cms_blog_list_plugin_template_form .melis-opentools,
+       #id_meliscms_plugin_modal .melis-opentools { display:none }`) — dans le BO legacy le clic
+       n'ouvrait rien d'utilisable. Le BO React sait l'ouvrir en vrai onglet (pont en fin de body),
+       donc on la ré-affiche ICI (et seulement ici — le BO legacy n'est pas touché). Ciblé sur
+       `.m-dnd-tool-open`, la classe des SEULES clés à molette de formulaire : les masquages
+       délibérés d'outils inexistants portent sur `.melis-opentools[data-tool-meliskey=…]` dans
+       l'arbre des outils (MelisDesign / maps) et restent intacts. */
+    #melis_cms_blog_list_plugin_template_form .m-dnd-tool-open,
+    #id_meliscms_plugin_modal .m-dnd-tool-open { display: inline-block !important; }{$extraStyle}
   </style>
 </head>
 <body>
@@ -937,6 +1009,41 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      Nothing from a legacy tool's own notifications is forwarded to the React host chrome. */
 </script>
 {$callbackBlocks}
+<script>
+/* ── Icône « clé à molette » des formulaires de plugin (`open_tool`) : ouvrir l'outil en ONGLET ─
+   Les formulaires de paramètres de plugin peuvent afficher, à côté d'un select, une clé à molette
+   qui ouvre l'outil qui alimente ce select (ex. « Default post » du plugin Blog → l'outil Blog ;
+   idem Actualités, Slider, Prospects). Elle est générée par MelisFieldRow (option `open_tool`) et
+   ne porte QUE des attributs data — c'est melisCore.js qui, sur `.melis-opentools`, appelle
+   `melisHelper.tabOpen(...)`. Or tabOpen ne sait ouvrir un onglet QUE dans le document de son
+   propre iframe : ici il injectait l'outil cible DANS la page d'édition (l'outil legacy écrasait
+   le contenu de l'onglet « Edition »), sans les ressources JS de son module (d'où un
+   « initBlogList is not defined » et une liste vide).
+   On intercepte donc en capture (AVANT le handler délégué sur `body`) et on demande à l'hôte React
+   d'ouvrir l'outil comme un vrai onglet, via le pont `__melisOpenTool` (App.tsx) — même mécanisme
+   que les plugins de dashboard (cf. dashboardPluginPageAction). Ici l'appelant ne connaît que le
+   melisKey de la cible : c'est l'hôte qui le résout en route React (registre alimenté par le
+   menu, briques comprises).
+   On vise `.m-dnd-tool-open` (classe propre à la clé à molette des formulaires) et non
+   `.melis-opentools`, partagée avec l'arbre des outils du BO legacy. */
+(function(){
+  document.addEventListener('click', function(e){
+    var wrench = e.target && e.target.closest ? e.target.closest('.m-dnd-tool-open') : null;
+    if (!wrench) return;
+    var melisKey = wrench.getAttribute('data-tool-meliskey');
+    if (!melisKey) return;
+    var host = window.__melisRealParent || window.parent;
+    if (!host || host === window) return;
+    e.preventDefault();
+    e.stopPropagation();
+    /* melisModalOpenTools.js ferme la modale du plugin via un handler délégué sur cette même
+       classe — neutralisé par notre stopPropagation : on le refait, sinon la modale resterait
+       ouverte derrière au retour sur l'onglet de la page. */
+    try { melisCoreTool.hideModal('id_meliscms_plugin_modal_container'); } catch (err) {}
+    try { host.postMessage({ __melisOpenTool: true, melisKey: melisKey }, '*'); } catch (err) {}
+  }, true);
+})();
+</script>
 </body>
 </html>
 HTML;
@@ -1297,7 +1404,7 @@ HTML;
        (prospects : xaxis + yaxis) → des traits de grille BLANCS sur fond sombre, très marqués.
        On repasse donc l'axe (formes `xaxis`/`yaxis` ET `xaxes[]`/`yaxes[]`) sur le même token. */
     var axis = function(a){ return a ? jq.extend({}, a, { tickColor: border }) : a; };
-    var axes = function(list){ return jq.isArray(list) ? jq.map(list, axis) : list; };
+    var axes = function(list){ return Array.isArray(list) ? jq.map(list, axis) : list; };
     var opts = options || {};
     opts = jq.extend({}, opts, { grid: jq.extend({}, opts.grid || {}, {
       backgroundColor: null, /* ← le fond blanc peint dans le canvas */
@@ -1357,8 +1464,8 @@ JS;
     if (!isDark()) return original.apply(this, arguments); /* clair = couleur d'origine de la série */
     var primary = token('--melis-plugin-primary', '#2f6bff');
     var bg      = token('--melis-plugin-bg', '#0e1626');
-    var series = jq.isArray(data) ? jq.map(data, function(s){
-      if (!s || typeof s !== 'object' || jq.isArray(s)) return s;
+    var series = Array.isArray(data) ? jq.map(data, function(s){
+      if (!s || typeof s !== 'object' || Array.isArray(s)) return s;
       return jq.extend({}, s, {
         color: primary,
         points: jq.extend({}, s.points || {}, { fillColor: bg })
@@ -3660,7 +3767,8 @@ CSS;
   if (!document.querySelector('.melissb-dashboard-workflow')) return;
   var ROUTE_BY_TOOLKEY = {
     'meliscms_page':     '/melis-cms/page',
-    'meliscmsnews_page': '/melis-cms/news'
+    'meliscmsnews_page': '/melis-cms/news',
+    'meliscmsblog_page': '/melis-cms/blog'
   };
   document.addEventListener('click', function(e){
     var see = e.target && e.target.closest ? e.target.closest('.wd-see') : null;
@@ -3732,7 +3840,8 @@ CSS;
 (function(){
   if (!document.querySelector('.melis-cms-comments-dashboard-latest-comments')) return;
   var ROUTE_BY_POST_TYPE = {
-    'news': '/melis-cms/news'
+    'news': '/melis-cms/news',
+    'blog': '/melis-cms/blog'
   };
   document.addEventListener('click', function(e){
     var eye = e.target && e.target.closest ? e.target.closest('.mccom-view-post') : null;
@@ -4020,6 +4129,52 @@ HTML;
             // Le contenu est déterministe et versionné par le mtime des sources → cache long + ETag.
             ->addHeaderLine('Cache-Control', 'public, max-age=86400')
             ->addHeaderLine('ETag', '"' . $built['version'] . '"');
+
+        return $response;
+    }
+
+    /**
+     * Serves the platform's concatenated asset bundle (`etc/bundles/{css,js}/bundle-all[-login].*`)
+     * for the tool and dashboard-plugin iframes.
+     *
+     * Why not MelisCore's `/melis/get-{css,js}-bundles`: that action sets its `Content-Type` INSIDE
+     * the `file_exists()` branch and otherwise just `exit`s, so a missing bundle produces a 200 with
+     * an empty `text/html` body — which the browser refuses ("Refused to apply style from … MIME
+     * type ('text/html') … strict MIME checking") — and the previous `immutable` header let that
+     * empty answer be cached for a month. And the file IS routinely missing: saving the Modules tool
+     * wipes `etc/bundles/`, while only a hit on `/melis` or `/melis/login` rebuilds it — something a
+     * session living in `/melis-react` never does.
+     *
+     * Here the MIME type is always sent, and an empty answer is explicitly not cacheable, so the
+     * next render (which falls back to the per-module stylesheet list, cf. PlatformAssetsService)
+     * is picked up immediately.
+     */
+    public function platformBundleAction()
+    {
+        $isJs = $this->params()->fromQuery('t') === 'js';
+        $type = $isJs ? 'js' : 'css';
+        $mime = $isJs ? 'text/javascript' : 'text/css';
+
+        $response = $this->getResponse();
+        $headers  = $response->getHeaders()->addHeaderLine('Content-Type', $mime . '; charset=utf-8');
+
+        $path = \MelisReactOverride\Service\PlatformAssetsService::bundleFile(
+            $type,
+            $this->getServiceManager()
+        );
+
+        if ($path === null) {
+            // Nothing to serve: keep the declared type (an empty stylesheet is harmless, an HTML
+            // one is rejected) and make sure this answer is never cached.
+            $headers->addHeaderLine('Cache-Control', 'no-store, max-age=0');
+            $response->setContent('');
+
+            return $response;
+        }
+
+        // Versioned by the caller (?v=<plf_bundle_cache_time>) and rewritten on every rebuild.
+        $headers->addHeaderLine('Cache-Control', 'public, max-age=2629744, immutable');
+        $response->setContent((string) @file_get_contents($path));
 
         return $response;
     }
@@ -4738,13 +4893,18 @@ HTML;
     public function generateAction()
     {
         // The login page itself renders through THIS action: MelisAuthController::loginpageAction()
-        // forwards here with appconfigpath=/meliscore_login — that is the one legitimate anonymous
-        // caller (it's how an unauthenticated visitor sees the login form at all). Every other
-        // caller of this generic zone renderer is already gated by MelisCore\Module::checkIdentity()
+        // forwards here with appconfigpath=/meliscore_login — that is the original legitimate
+        // anonymous caller (it's how an unauthenticated visitor sees the login form at all). Every
+        // other caller of this generic zone renderer is already gated by MelisCore\Module::checkIdentity()
         // (attached on EVENT_ROUTE) upstream; this local guard is defense-in-depth for tool-renderer
-        // callers (see denyIfUnauthenticated() docblock), not for the public login zone tree.
+        // callers (see denyIfUnauthenticated() docblock), not for public pre-login zone trees. The
+        // allowlist is config-driven (meliscore/datas/public_zones, seeded in melis-core's own
+        // excluded.routes.php) rather than a single hardcoded string, so another module's own
+        // pre-login page (e.g. melis-login-2fa's verify-2fa code entry) can register itself without
+        // touching this file — same ArrayUtils::merge pattern already used for excluded_routes.
         $appconfigpath = $this->params()->fromRoute('appconfigpath', '');
-        if ($appconfigpath !== '/meliscore_login' && ($denied = $this->denyIfUnauthenticated())) {
+        $publicZones = $this->getServiceManager()->get('MelisCoreConfig')->getItem('/meliscore/datas/public_zones');
+        if (!in_array($appconfigpath, is_array($publicZones) ? $publicZones : [], true) && ($denied = $this->denyIfUnauthenticated())) {
             return $denied;
         }
 

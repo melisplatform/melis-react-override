@@ -15,6 +15,9 @@ use Laminas\Session\Container as SessionContainer;
  */
 class PlatformAssetsService
 {
+    /** Our own bundle route (MelisCore's answers `text/html` when the bundle file is missing). */
+    private const BUNDLE_ROUTE = '/melis/react-platform-bundle';
+
     public static function build(ServiceManager $sm): array
     {
         $session = new SessionContainer('meliscore');
@@ -153,12 +156,28 @@ class PlatformAssetsService
         $file = sys_get_temp_dir() . '/melis-react-platform-css.json';
         if (is_file($file) && (time() - (int) filemtime($file)) < 600) {
             $cached = json_decode((string) @file_get_contents($file), true);
-            if (is_array($cached)) {
+            // Re-validate a cached CONCATENATED bundle URL: `etc/bundles/` is wiped whenever the
+            // Modules tool is saved, so within the TTL the cache can still name a bundle that no
+            // longer exists — the iframe then links a route answering an empty document and the
+            // tool renders unstyled. Recompute instead (and fall back to the per-module list).
+            if (is_array($cached)
+                && !(count($cached) === 1
+                     && self::isConcatBundleUrl($cached[0])
+                     && (self::concatBundlePath($cached[0]) === null
+                         || @filesize(self::concatBundlePath($cached[0])) <= 0))) {
                 return $memo = $cached;
             }
         }
         $raw = $sm->get('MelisAssetManagerWebPack')->getAssets(true);
         $css = array_values((array) ($raw['css'] ?? []));
+
+        // No concatenated bundle in the list = `etc/bundles/` is empty. It is wiped on every
+        // Modules-tool save and MelisCore only rebuilds it when `/melis` or `/melis/login` is hit
+        // — which a session living in `/melis-react` never does, so the back-office would stay on
+        // the per-module list (30+ requests per iframe) for good. Rebuild it here instead.
+        if (!(count($css) === 1 && self::isConcatBundleUrl($css[0])) && self::regenerateBundles($sm)) {
+            $css = array_values((array) ($sm->get('MelisAssetManagerWebPack')->getAssets(true)['css'] ?? []));
+        }
 
         // With a CONCATENATED bundle, getAssets(true) returns that single route
         // (`/melis/get-css-bundles`) instead of the per-module list. The browser is happy with a
@@ -170,14 +189,75 @@ class PlatformAssetsService
         // Decided here rather than in build() so the (expensive) getAssets call is cached too.
         if (count($css) === 1 && self::isConcatBundleUrl($css[0])) {
             $path = self::concatBundlePath($css[0]);
-            if ($path === null || @filesize($path) <= 0) {
-                $css = array_values((array) ($sm->get('MelisAssetManagerWebPack')->getAssets(false)['css'] ?? []));
-            }
+            $css = ($path === null)
+                ? array_values((array) ($sm->get('MelisAssetManagerWebPack')->getAssets(false)['css'] ?? []))
+                // Serve the bundle through OUR route: MelisCore's answers an empty `text/html`
+                // body once `etc/bundles/` has been wiped (Modules tool save), and the iframe HTML
+                // linking it can outlive the file. Ours always answers with the right MIME type.
+                : [self::toOwnBundleRoute($css[0])];
         }
         if ($css !== []) {
             @file_put_contents($file, json_encode($css), LOCK_EX);
         }
         return $memo = $css;
+    }
+
+    /**
+     * Rebuilds `etc/bundles/` (the same MelisCore call its own listener makes on `/melis`), so the
+     * React back-office is not stuck on the per-module asset list once the Modules tool has wiped
+     * the bundle. Returns true when a bundle was actually produced.
+     *
+     * Only one process rebuilds at a time — the others fall through to the per-module list rather
+     * than piling up on a job that takes seconds — and a failing rebuild is not retried more than
+     * once a minute, so it can never turn every iframe render into a full rebuild.
+     */
+    private static function regenerateBundles(ServiceManager $sm): bool
+    {
+        try {
+            $platform    = getenv('MELIS_PLATFORM');
+            $buildBundle = $sm->get('MelisCoreConfig')->getItem('/meliscore/datas/')[$platform]['build_bundle'] ?? true;
+        } catch (\Throwable) {
+            return false;
+        }
+
+        if (!$buildBundle) {
+            return false;
+        }
+
+        $dir      = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/') . '/../etc/bundles';
+        $lockFile = $dir . '/.generate.lock';
+
+        if (!is_dir($dir) && !@mkdir($dir, 0777, true) && !is_dir($dir)) {
+            return false;
+        }
+
+        clearstatcache(true, $lockFile);
+        if (is_file($lockFile) && (time() - (int) filemtime($lockFile)) < 60) {
+            return false;
+        }
+
+        $lock = @fopen($lockFile, 'c');
+        if ($lock === false) {
+            return false;
+        }
+
+        if (!flock($lock, LOCK_EX | LOCK_NB)) {
+            fclose($lock);
+            return false;
+        }
+
+        @touch($lockFile);
+
+        try {
+            $sm->get('ModulesService')->generateBundle();
+        } catch (\Throwable) {
+            // A missing bundle is not fatal: the caller keeps the per-module list.
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+
+        return self::bundleFile('css', $sm) !== null;
     }
 
     /**
@@ -188,7 +268,9 @@ class PlatformAssetsService
     /** `/melis/get-css-bundles?v=…` / `/melis/get-js-bundles?v=…` — the concatenated-bundle routes. */
     public static function isConcatBundleUrl(string $url): bool
     {
-        return str_starts_with($url, '/melis/get-css-bundles') || str_starts_with($url, '/melis/get-js-bundles');
+        return str_starts_with($url, '/melis/get-css-bundles')
+            || str_starts_with($url, '/melis/get-js-bundles')
+            || str_starts_with($url, self::BUNDLE_ROUTE);
     }
 
     /**
@@ -198,10 +280,45 @@ class PlatformAssetsService
     public static function concatBundlePath(string $url): ?string
     {
         $docRoot = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/');
-        $isCss   = str_starts_with($url, '/melis/get-css-bundles');
-        $path    = $docRoot . '/../etc/bundles/' . ($isCss ? 'css/bundle-all.css' : 'js/bundle-all.js');
+        $isJs    = str_starts_with($url, '/melis/get-js-bundles')
+            || (str_starts_with($url, self::BUNDLE_ROUTE) && str_contains($url, 't=js'));
+        $path    = $docRoot . '/../etc/bundles/' . ($isJs ? 'js/bundle-all.js' : 'css/bundle-all.css');
 
-        return is_file($path) ? $path : null;
+        return is_file($path) && filesize($path) > 0 ? $path : null;
+    }
+
+    /**
+     * The bundle file to serve for $type ('css'|'js'), or null when there is none (missing or
+     * empty). The login variant is used for a visitor without an identity, exactly like MelisCore's
+     * own bundle routes do.
+     */
+    public static function bundleFile(string $type, ServiceManager $sm): ?string
+    {
+        $type = ($type === 'js') ? 'js' : 'css';
+
+        $identity = false;
+        try {
+            $identity = (bool) $sm->get('MelisCoreAuth')->hasIdentity();
+        } catch (\Throwable) {}
+
+        $docRoot = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/');
+        $path    = $docRoot . '/../etc/bundles/' . $type . '/bundle-all' . ($identity ? '' : '-login') . '.' . $type;
+
+        return is_file($path) && filesize($path) > 0 ? $path : null;
+    }
+
+    /**
+     * Swap MelisCore's bundle route for ours, keeping the `?v=` cache buster.
+     * @see \MelisReactOverride\Controller\PluginViewController::platformBundleAction()
+     */
+    private static function toOwnBundleRoute(string $url): string
+    {
+        $query = (($pos = strpos($url, '?')) !== false) ? substr($url, $pos + 1) : '';
+        $isJs  = str_starts_with($url, '/melis/get-js-bundles');
+
+        return self::BUNDLE_ROUTE
+            . '?' . ($isJs ? 't=js' : 't=css')
+            . ($query !== '' ? '&' . $query : '');
     }
 
     public static function resolvePath(string $url): ?string
