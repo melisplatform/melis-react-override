@@ -2450,7 +2450,7 @@ CSS;
        "/melis/melis/dashboard-plugin/…" (404) ou une CSS renvoyant du HTML. <base href="/"> corrige. -->
   <base href="/" />
   <!-- Les surcharges de mise en page sont injectées APRES les feuilles du thème (voir
-       $overrideCss plus bas) : à spécificité égale, c'est la dernière règle qui gagne. -->
+       \$narrowCss plus bas) : à spécificité égale, c'est la dernière règle qui gagne. -->
   <script>
   /* Neutralise bundle.js "Remove Envato Frame" guard — same shim as toolPageAction. */
   try { window.__melisRealParent = window.parent; } catch(e) {}
@@ -2758,7 +2758,7 @@ CSS;
        (melis-small-business/public/css/style.css, `@media only screen and (max-width: 767px)`).
        Cette règle visait le BO classique sur mobile ; ici elle s'applique TOUJOURS, parce que la
        media query est évaluée contre la largeur de l'IFRAME (celle de la tuile), pas de la fenêtre
-       — même piège que le `$gridFix` plus haut. Les onglets n'ont besoin que des ~32px de leur
+       — même piège que le `\$gridFix` plus haut. Les onglets n'ont besoin que des ~32px de leur
        padding (`.nav-tabs > li > a`), d'où une bande verte à moitié vide sous les libellés.
        `height: auto` rend la hauteur au padding, et laisse le libellé passer à deux lignes s'il
        est long. Corrigé ICI et pas dans la vue du module : le BO legacy n'est pas touché.
