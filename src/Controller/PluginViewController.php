@@ -64,6 +64,97 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         return null;
     }
 
+    /**
+     * Authorization guard for the generic legacy-tool renderer (audit DEKRA 7.0).
+     *
+     * toolPageAction() renders WHATEVER melisKey the URL asks for, so authentication alone let any
+     * back-office account open any legacy tool — Users, Sites, SQL — by editing the `key` query
+     * parameter. The decision has to follow the CALLER's rights, not the identifier received.
+     *
+     * Scope, deliberately narrow: the refusal applies to keys the rights system actually knows as
+     * grantable (the section/tool tree returned by MelisCoreRights::getToolSectionMap(), i.e. what
+     * the rights checkboxes can tick). Those are exactly the keys a canAccess() answer is
+     * meaningful for.
+     *
+     * Any OTHER key — a wrapper, a sub-zone, a brick's own left-menu node such as
+     * `meliscmsnews_left_menu`, whose grantable counterpart is a DIFFERENT node
+     * (`meliscms_news_tool_section`) living in another config tree — is left through and logged.
+     * Refusing on a canAccess() miss there would lock legitimate users out of tools they were
+     * granted (measured: News answers false for a user who has News), and a zone render is not the
+     * only barrier anyway — each legacy tool gates its own data (cf. `$view->hasAccess`). The log
+     * lines (grep MELIS_TOOLPAGE_UNSCOPED) list what remains, for a follow-up mapping.
+     *
+     * @return \Laminas\Http\Response|null 403 when refused, null when allowed.
+     */
+    private function denyUnlessToolAccess($key)
+    {
+        $key = (string) $key;
+        $sm  = $this->getServiceManager();
+
+        try {
+            $rights    = $sm->get('MelisCoreRights');
+            $grantable = $this->grantableToolKeys();
+        } catch (\Throwable $e) {
+            return null; // rights/config indisponibles : on ne bloque pas sur une panne
+        }
+
+        if (!isset($grantable[$key])) {
+            error_log('MELIS_TOOLPAGE_UNSCOPED key=' . ($key !== '' ? $key : '-'));
+
+            return null;
+        }
+
+        if ($rights->canAccess($key)) {
+            return null;
+        }
+
+        $response = $this->getResponse();
+        $response->setStatusCode(403);
+        $response->getHeaders()->addHeaderLine('Content-Type', 'text/plain; charset=utf-8');
+        $response->setContent('403 Forbidden');
+
+        return $response;
+    }
+
+    /**
+     * Keys the rights tree can grant: every section and tool node of getToolSectionMap(), under
+     * both its config key and its resolved melisKey (they differ for type-linked nodes). The seven
+     * top-level section roots are skipped — they are containers, not tools.
+     *
+     * @return array<string,true>
+     */
+    private function grantableToolKeys()
+    {
+        static $cache = null;
+        if ($cache !== null) {
+            return $cache;
+        }
+
+        $cache = [];
+        $map   = $this->getServiceManager()->get('MelisCoreRights')->getToolSectionMap();
+
+        $collect = function ($nodes, $depth) use (&$collect, &$cache) {
+            foreach ((array) $nodes as $node) {
+                if (!is_array($node)) {
+                    continue;
+                }
+                if ($depth > 0) {
+                    foreach (['key', 'melisKey'] as $field) {
+                        if (!empty($node[$field]) && is_string($node[$field])) {
+                            $cache[$node[$field]] = true;
+                        }
+                    }
+                }
+                if (!empty($node['children'])) {
+                    $collect($node['children'], $depth + 1);
+                }
+            }
+        };
+        $collect($map, 0);
+
+        return $cache;
+    }
+
     /** Current PHP session id, or '' when no session is active. */
     private function currentSessionId()
     {
@@ -140,6 +231,10 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         if (!$key) {
             $this->getResponse()->setStatusCode(400);
             return $this->getResponse();
+        }
+
+        if ($denied = $this->denyUnlessToolAccess($key)) {
+            return $denied;
         }
 
         // ── Resolve the melisKey → appConfig path ────────────────────────────
