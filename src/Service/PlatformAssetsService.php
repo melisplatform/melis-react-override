@@ -31,6 +31,10 @@ class PlatformAssetsService
             if (str_starts_with($url, 'http') || str_starts_with($url, '/melis')) {
                 return true;
             }
+            // Cache-busted URLs (e.g. "/MelisCore/build/css/bundle.css?v=…") must be checked
+            // without their query string, or file_exists() fails and the stylesheet is dropped
+            // (MelisCore's bundle.css — Bootstrap, BootstrapDialog, daterangepicker, theme).
+            $url = strtok($url, '?#');
             if (file_exists($docRoot . $url)) {
                 return true;
             }
