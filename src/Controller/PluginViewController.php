@@ -725,6 +725,8 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
 
         // TinyMCE configs, resolved server-side and inlined (see the <script> block below).
         $tinyMceConfigsJs = $this->tinyMceConfigsScript();
+        // DataTables texts, same reason (async fetch lost the race against the tool's table init)
+        $dataTableLanguageJs = $this->dataTableTranslationsScript();
 
         // Platform JS (bundle.js/jQuery + core extras) — in <head> so inline scripts inside the
         // tool HTML have jQuery & the platform globals at parse time.
@@ -943,6 +945,7 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      list). The classic BO never hit this: its preload fires at shell load, long before any tool.
      Inlining removes the race entirely; the async call stays as a fallback if inlining failed. */
 {$tinyMceConfigsJs}
+{$dataTableLanguageJs}
   </script>
 <div id="content">
   <div class="tab-content" id="melis-id-body-content-load">
@@ -4021,6 +4024,50 @@ HTML;
                  . "  }";
         } catch (\Throwable) {
             return $fallback;
+        }
+    }
+
+    /**
+     * Inline JS that fills melisDataTable.tableLanguage synchronously.
+     *
+     * melisDataTable.js fetches the DataTables texts with an ASYNC $.get at load. In this standalone
+     * page the tool's table is initialised in the same parse, before the answer lands, so it was built
+     * with `language: undefined` → DataTables' English defaults ("entries per page", "Search:"…) until
+     * the list was refreshed (Mantis #0011235). Same source as the classic back-office:
+     * LanguageController::getDataTableTranslationsAction. On any failure the async fetch still runs.
+     */
+    private function dataTableTranslationsScript(): string
+    {
+        try {
+            $controller = $this->getEvent()->getApplication()->getServiceManager()
+                ->get('ControllerManager')->get('MelisCore\Controller\Language');
+            $controller->setEvent($this->getEvent());
+
+            $result = $controller->getDataTableTranslationsAction();
+            $trans  = $result instanceof JsonModel ? $result->getVariables() : null;
+            if ($trans instanceof \Traversable) {
+                $trans = iterator_to_array($trans);
+            }
+            if (!is_array($trans) || $trans === []) {
+                return '';
+            }
+
+            $json = json_encode(
+                $trans,
+                JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+            );
+            if ($json === false) {
+                return '';
+            }
+
+            return "  try {\n"
+                 . "    var melisReactDtLanguage = {$json};\n"
+                 . "    if (window.melisDataTable && melisDataTable.tableLanguage) {\n"
+                 . "      for (var k in melisReactDtLanguage) melisDataTable.tableLanguage[k] = melisReactDtLanguage[k];\n"
+                 . "    }\n"
+                 . "  } catch(e) {}";
+        } catch (\Throwable) {
+            return '';
         }
     }
 
