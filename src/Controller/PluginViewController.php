@@ -549,7 +549,19 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
         if ($key === 'meliscms_page' && $idPageParam !== '' && $idPageParam !== null) {
             $zoneId = $idPageParam . '_' . $zoneId;
         }
-        $page   = $this->buildToolPage($html, $jsCallBacks, $assets, $zoneId, $key);
+        // How to open ONE record of this tool, for a deep link /[section]/[tool]/<id> of the React shell
+        // (it opened the list and dropped the id, Mantis #0011237). Tool-creator tools: the list is
+        // "<m>_tool" and a record opens in the "<m>_properties_tool" tab — the same tabOpen() call as
+        // the list's edit button (melis-tool-creator template/Asset/tab-edit-btn).
+        $openRecord = null;
+        if (preg_match('/^(.+)_tool$/', $key, $toolMatch) && !empty($melisKeys[$toolMatch[1] . '_properties_tool'])) {
+            $openRecord = [
+                'target' => $toolMatch[1] . '_properties_tool',
+                'parent' => $zoneId,
+                'title'  => (string) $this->getServiceManager()->get('translator')->translate('tr_' . $toolMatch[1] . '_title'),
+            ];
+        }
+        $page   = $this->buildToolPage($html, $jsCallBacks, $assets, $zoneId, $key, $openRecord);
 
         $response = $this->getResponse();
         $response->setContent($page);
@@ -602,11 +614,12 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
      * blocks at the bottom of <body> — after the tool HTML — so the DOM exists
      * when they run.
      */
-    private function buildToolPage(string $html, array $jsCallbacks, array $assets, string $zoneId = '', string $melisKey = ''): string
+    private function buildToolPage(string $html, array $jsCallbacks, array $assets, string $zoneId = '', string $melisKey = '', ?array $openRecord = null): string
     {
         $zoneId    = $zoneId !== '' ? $zoneId : 'melis-zone-root-pane';
         $zoneIdJs  = json_encode($zoneId);
         $melisKeyJs = json_encode($melisKey);
+        $openRecordJs = json_encode($openRecord, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
         $melisKeyAttr = htmlspecialchars($melisKey, ENT_QUOTES);
         $zoneIdAttr   = htmlspecialchars($zoneId, ENT_QUOTES);
 
@@ -1036,10 +1049,35 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     var _rt; function scheduleReport(){ try { clearTimeout(_rt); } catch(e) {} _rt = setTimeout(report, 60); }
     try { new MutationObserver(scheduleReport).observe(bar, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] }); } catch(e) {}
     report();
+    /* Open ONE record (host deep link /[section]/[tool]/<id>, Mantis #0011237): a tool's own hook
+       window.melisReactOpenRecord[melisKey](id), else the tool-creator edit tab (PHP gives its
+       target), else the edit button of that row in the list once the DataTable has drawn it. */
+    var openConf = {$openRecordJs};
+    function openRecord(id){
+      try {
+        var hooks = window.melisReactOpenRecord;
+        if (hooks && typeof hooks[melisKey] === 'function') { hooks[melisKey](id); return; }
+        if (openConf && window.melisHelper && melisHelper.tabOpen) {
+          melisHelper.tabOpen((openConf.title || '') + ' / ' + id, 'fa fa-puzzle-piece', id + '_id_' + openConf.target,
+                              openConf.target, { id: id }, openConf.parent);
+          return;
+        }
+      } catch(err) {}
+      var tries = 0;
+      (function clickRow(){
+        var row = null, rows = document.querySelectorAll('tr[id]'), i;
+        for (i = 0; i < rows.length; i++) { if (rows[i].getAttribute('id') === id) { row = rows[i]; break; } }
+        var btn = row && row.querySelector('[class*="btnEdit"], [class*="EditBtn"], [class*="edit-btn"], .fa-pencil');
+        if (btn) { (btn.closest('button, a') || btn).click(); return; }
+        if (++tries < 25) setTimeout(clickRow, 200);
+      })();
+    }
     window.addEventListener('message', function(e){
       var d = e.data || {};
       if (!d.__melisToolTabCmd || d.melisKey !== melisKey || !d.id) return;
-      if (d.cmd === 'activate') {
+      if (d.cmd === 'open') {
+        openRecord(String(d.id));
+      } else if (d.cmd === 'activate') {
         try { if (window.melisHelper && melisHelper.tabSwitch) melisHelper.tabSwitch(d.id);
           else { var t = bar.querySelector("a.tab-element[data-id='" + d.id + "']"); if (t) t.click(); } } catch(err) {}
       } else if (d.cmd === 'close') {
