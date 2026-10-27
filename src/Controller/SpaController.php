@@ -32,7 +32,16 @@ class SpaController extends AbstractActionController
         $response->getHeaders()
             ->addHeaderLine('Content-Type', 'text/html; charset=utf-8')
             // Never cache the HTML shell; the referenced assets are content-hashed.
-            ->addHeaderLine('Cache-Control', 'no-cache, no-store, must-revalidate');
+            ->addHeaderLine('Cache-Control', 'no-cache, no-store, must-revalidate')
+            // SECURITY (audit RO-M1): this shell is PUBLIC (excluded_routes — the SPA renders
+            // its own login screen), so without anti-framing headers the React login page can
+            // be embedded in a third-party iframe (clickjacking / credential overlay). The
+            // legacy /melis gets these from core; the SPA shell must set them itself. The raw
+            // index.html streamed by MelisAssetManager is already neutralised (attachment,
+            // fix AM-H2).
+            ->addHeaderLine('X-Frame-Options', 'SAMEORIGIN')
+            ->addHeaderLine('Content-Security-Policy', "frame-ancestors 'self'")
+            ->addHeaderLine('X-Content-Type-Options', 'nosniff');
 
         return $response;
     }

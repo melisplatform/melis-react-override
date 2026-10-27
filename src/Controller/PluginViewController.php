@@ -5064,7 +5064,9 @@ HTML;
                 $existingId
             );
         } catch (\Throwable $e) {
-            return new JsonModel(['success' => false, 'error' => $e->getMessage()]);
+            // SECURITY (audit RA-M2) : détail au log serveur, message générique au client.
+            error_log('PluginViewController config save: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+            return new JsonModel(['success' => false, 'error' => 'Internal error']);
         }
 
         return new JsonModel(['success' => true]);
