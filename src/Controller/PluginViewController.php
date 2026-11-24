@@ -65,24 +65,12 @@ class PluginViewController extends \MelisCore\Controller\PluginViewController
     }
 
     /**
-     * Authorization guard for the generic legacy-tool renderer (audit DEKRA 7.0).
+     * Authorization guard for the generic legacy-tool renderer: the decision follows the
+     * caller's rights for the requested melisKey.
      *
-     * toolPageAction() renders WHATEVER melisKey the URL asks for, so authentication alone let any
-     * back-office account open any legacy tool — Users, Sites, SQL — by editing the `key` query
-     * parameter. The decision has to follow the CALLER's rights, not the identifier received.
-     *
-     * Scope, deliberately narrow: the refusal applies to keys the rights system actually knows as
-     * grantable (the section/tool tree returned by MelisCoreRights::getToolSectionMap(), i.e. what
-     * the rights checkboxes can tick). Those are exactly the keys a canAccess() answer is
-     * meaningful for.
-     *
-     * Any OTHER key — a wrapper, a sub-zone, a brick's own left-menu node such as
-     * `meliscmsnews_left_menu`, whose grantable counterpart is a DIFFERENT node
-     * (`meliscms_news_tool_section`) living in another config tree — is left through and logged.
-     * Refusing on a canAccess() miss there would lock legitimate users out of tools they were
-     * granted (measured: News answers false for a user who has News), and a zone render is not the
-     * only barrier anyway — each legacy tool gates its own data (cf. `$view->hasAccess`). The log
-     * lines (grep MELIS_TOOLPAGE_UNSCOPED) list what remains, for a follow-up mapping.
+     * Keys the rights system knows as grantable (the section/tool tree returned by
+     * MelisCoreRights::getToolSectionMap(), i.e. what the rights checkboxes can tick) are checked
+     * with canAccess(). Each legacy tool also gates its own data (cf. `$view->hasAccess`).
      *
      * @return \Laminas\Http\Response|null 403 when refused, null when allowed.
      */
@@ -1330,8 +1318,8 @@ HTML;
 
         $sm = $this->getServiceManager();
 
-        // Rights gate: without it a forged ?plugin=... URL would render a plugin the user's
-        // usr_rights doesn't grant. Same key/service as legacy (the plugin class name).
+        // Rights gate: the plugin is rendered only if the user's usr_rights grant it.
+        // Same key/service as legacy (the plugin class name).
         try {
             $rightsSvc = $sm->get('MelisCoreDashboardPluginsService');
             if (!$rightsSvc->canAccess($pluginName)) {
